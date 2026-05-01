@@ -1,0 +1,1 @@
+/Volumes/External\ Home/jesus/code/solarfocus/target/release/libsolarfocus_desktop.rlib: /Volumes/External\ Home/jesus/code/solarfocus/apps/desktop/src/app_state.rs /Volumes/External\ Home/jesus/code/solarfocus/apps/desktop/src/lib.rs
