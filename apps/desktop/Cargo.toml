@@ -1,0 +1,12 @@
+# apps/desktop/Cargo.toml
+
+[package]
+name = "solarfocus-desktop"
+version = "0.1.0"
+edition = "2021"
+authors = ["SolarFocus Team"]
+
+[dependencies]
+iced = { version = "0.10", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.8"

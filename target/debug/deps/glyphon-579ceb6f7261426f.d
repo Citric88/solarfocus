@@ -1,0 +1,11 @@
+/Volumes/External Home/jesus/code/solarfocus/target/debug/deps/glyphon-579ceb6f7261426f.d: /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/lib.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/error.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_atlas.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_render.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/shader.wgsl
+
+/Volumes/External Home/jesus/code/solarfocus/target/debug/deps/libglyphon-579ceb6f7261426f.rlib: /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/lib.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/error.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_atlas.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_render.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/shader.wgsl
+
+/Volumes/External Home/jesus/code/solarfocus/target/debug/deps/libglyphon-579ceb6f7261426f.rmeta: /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/lib.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/error.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_atlas.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_render.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/shader.wgsl
+
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/lib.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/error.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_atlas.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/text_render.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glyphon-0.3.0/src/shader.wgsl:

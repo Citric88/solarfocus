@@ -1,0 +1,12 @@
+# solarfocus-os/Cargo.toml
+
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop",
+]
+
+[workspace.dependencies]
+iced = { version = "0.10", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.8"
