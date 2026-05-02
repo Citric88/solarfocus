@@ -20,7 +20,12 @@ use solar_focus_intelligence::{
 };
 use solar_focus_core::focus_rules::FocusRulesEngine;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+#[cfg(feature = "llm")]
+use infra::model_download::DownloadEvent;
 
 mod infra;
 
@@ -53,6 +58,18 @@ pub enum Message {
     ShowToast { text: String, expires_in_secs: u64 },
     DismissToast,
     ToastTick, // periodic check to expire toasts
+
+    // Phase 3.5b — model download flow
+    StartModelDownload,
+    SkipModelDownload,
+    DownloadPoll,
+    DownloadFinished(Result<String, String>), // Ok(path) | Err(message)
+    DismissDownloadModal,
+
+    // Phase 3.5b — daily summary scheduler
+    DailyRollCheck,
+    DailySummaryReady { date: String, text: String },
+    DismissRecap,
 }
 
 pub struct App {
@@ -74,6 +91,24 @@ pub struct App {
     focus_rules: FocusRulesEngine,
     consecutive_distraction_samples: u8,
     toast: Option<Toast>,
+
+    // Phase 3.5b — download lifecycle
+    download_modal_open: bool,
+    download_active: Arc<AtomicBool>,
+    download_progress: Arc<StdMutex<Option<DownloadSnapshot>>>,
+    download_error: Option<String>,
+
+    // Phase 3.5b — daily summary scheduler
+    last_summary_date: Option<String>, // ISO YYYY-MM-DD of the last day we summarized
+    recap: Option<(String, String)>,   // (date, text) — shown as a card if Some
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadSnapshot {
+    pub downloaded: u64,
+    pub total: u64,
+    pub bytes_per_sec: u64,
+    pub verifying: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +141,14 @@ impl App {
             coach.is_ready(),
         );
 
+        // Pre-load the most recent recap so it can render on first paint.
+        let recap = session_repo
+            .as_ref()
+            .and_then(|r| r.latest_summary().ok().flatten());
+
+        // First-run download check — only when LLM feature is on.
+        let download_modal_open = first_run_should_offer_download(&settings);
+
         (
             Self {
                 pomodoro_engine: engine,
@@ -122,6 +165,12 @@ impl App {
                 focus_rules: FocusRulesEngine::new(),
                 consecutive_distraction_samples: 0,
                 toast: None,
+                download_modal_open,
+                download_active: Arc::new(AtomicBool::new(false)),
+                download_progress: Arc::new(StdMutex::new(None)),
+                download_error: None,
+                last_summary_date: today_iso_local(),
+                recap,
             },
             Task::none(),
         )
@@ -131,6 +180,113 @@ impl App {
         self.classifier = build_classifier(&self.settings);
         log::info!("Classifier rebuilt: mode={:?}", self.settings.classifier_mode);
     }
+
+    #[cfg(feature = "llm")]
+    fn spawn_download(&mut self) -> Task<Message> {
+        use infra::model_download::{download_model, manifest_for};
+        let Some(manifest) = manifest_for(self.settings.model_choice) else {
+            log::error!("No manifest for {:?}", self.settings.model_choice);
+            return Task::none();
+        };
+        let progress = self.download_progress.clone();
+        let active = self.download_active.clone();
+        active.store(true, Ordering::Relaxed);
+        *progress.lock().unwrap() = Some(DownloadSnapshot {
+            downloaded: 0,
+            total: manifest.size_bytes,
+            bytes_per_sec: 0,
+            verifying: false,
+        });
+        log::info!(
+            "Starting download: {} ({:.1} MB)",
+            manifest.filename,
+            manifest.size_bytes as f64 / 1_048_576.0
+        );
+
+        let progress_for_cb = progress.clone();
+        let fut = async move {
+            let result = download_model(manifest, move |evt| {
+                let mut snap = progress_for_cb.lock().unwrap();
+                let cur = snap.clone().unwrap_or(DownloadSnapshot {
+                    downloaded: 0,
+                    total: manifest.size_bytes,
+                    bytes_per_sec: 0,
+                    verifying: false,
+                });
+                let new = match evt {
+                    DownloadEvent::Started { total_bytes } => DownloadSnapshot {
+                        downloaded: 0,
+                        total: total_bytes,
+                        bytes_per_sec: 0,
+                        verifying: false,
+                    },
+                    DownloadEvent::Progress {
+                        downloaded,
+                        total,
+                        bytes_per_sec,
+                    } => DownloadSnapshot {
+                        downloaded,
+                        total,
+                        bytes_per_sec,
+                        verifying: false,
+                    },
+                    DownloadEvent::Verifying => DownloadSnapshot {
+                        verifying: true,
+                        ..cur
+                    },
+                    DownloadEvent::Complete { .. } => DownloadSnapshot {
+                        downloaded: cur.total,
+                        verifying: false,
+                        ..cur
+                    },
+                    DownloadEvent::Error(_) => cur,
+                };
+                *snap = Some(new);
+            })
+            .await;
+            active.store(false, Ordering::Relaxed);
+            match result {
+                Ok(p) => Message::DownloadFinished(Ok(p.display().to_string())),
+                Err(e) => Message::DownloadFinished(Err(e.to_string())),
+            }
+        };
+        Task::perform(fut, |m| m)
+    }
+
+    #[cfg(not(feature = "llm"))]
+    fn spawn_download(&mut self) -> Task<Message> {
+        log::warn!("Download requested but binary built without `llm` feature");
+        Task::none()
+    }
+}
+
+fn today_iso_local() -> Option<String> {
+    Some(chrono::Local::now().format("%Y-%m-%d").to_string())
+}
+
+fn yesterday_iso_local() -> Option<String> {
+    let d = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+    Some(d.format("%Y-%m-%d").to_string())
+}
+
+#[cfg(feature = "llm")]
+fn first_run_should_offer_download(settings: &Settings) -> bool {
+    use infra::model_download::{manifest_for, model_present};
+    if !settings.ai_enabled || settings.model_download_skipped {
+        return false;
+    }
+    match manifest_for(settings.model_choice) {
+        Some(m) => !model_present(m),
+        None => false,
+    }
+}
+
+#[cfg(not(feature = "llm"))]
+fn first_run_should_offer_download(_settings: &Settings) -> bool {
+    false
+}
+
+impl App {
 
     pub fn title(&self) -> String {
         match self.pomodoro_engine.state() {
@@ -182,6 +338,16 @@ impl App {
         if self.toast.is_some() {
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::ToastTick));
         }
+
+        // Download progress poller: 4 Hz while a download is active.
+        if self.download_active.load(Ordering::Relaxed) {
+            subs.push(
+                iced::time::every(Duration::from_millis(250)).map(|_| Message::DownloadPoll),
+            );
+        }
+
+        // Daily roll-over check: once per minute, always on.
+        subs.push(iced::time::every(Duration::from_secs(60)).map(|_| Message::DailyRollCheck));
 
         Subscription::batch(subs)
     }
@@ -400,14 +566,244 @@ impl App {
                 }
                 Task::none()
             }
+
+            Message::StartModelDownload => {
+                self.download_modal_open = true; // keep modal showing while progress flows
+                self.download_error = None;
+                self.spawn_download()
+            }
+            Message::SkipModelDownload => {
+                log::info!("User skipped first-run model download");
+                self.settings.model_download_skipped = true;
+                self.settings.save();
+                self.download_modal_open = false;
+                Task::none()
+            }
+            Message::DownloadPoll => {
+                // Force a re-render so the progress bar refreshes from the
+                // shared `download_progress` state. No state change needed.
+                Task::none()
+            }
+            Message::DownloadFinished(result) => {
+                match result {
+                    Ok(p) => {
+                        log::info!("Model downloaded: {}", p);
+                        self.download_modal_open = false;
+                        self.download_error = None;
+                        self.toast = Some(Toast {
+                            text: match self.settings.language {
+                                Language::Es => "Modelo descargado. Reinicia para activar el coach IA.".to_string(),
+                                Language::En => "Model downloaded. Restart to enable the AI coach.".to_string(),
+                            },
+                            expires_at: Instant::now() + Duration::from_secs(8),
+                        });
+                    }
+                    Err(e) => {
+                        log::error!("Model download failed: {}", e);
+                        self.download_error = Some(e);
+                    }
+                }
+                Task::none()
+            }
+            Message::DismissDownloadModal => {
+                self.download_modal_open = false;
+                Task::none()
+            }
+
+            Message::DailyRollCheck => {
+                let today = match today_iso_local() {
+                    Some(s) => s,
+                    None => return Task::none(),
+                };
+                let last = self.last_summary_date.clone();
+                if last.as_deref() == Some(today.as_str()) {
+                    return Task::none();
+                }
+                // First boot of a new day → generate yesterday's summary.
+                self.last_summary_date = Some(today.clone());
+
+                let yesterday = match yesterday_iso_local() {
+                    Some(s) => s,
+                    None => return Task::none(),
+                };
+
+                if let Some(repo) = self.session_repo.as_ref() {
+                    let rows = repo.sessions_for_date(&yesterday).unwrap_or_default();
+                    if rows.is_empty() {
+                        log::info!("No sessions for {} — skipping daily summary", yesterday);
+                        return Task::none();
+                    }
+                    let sessions_completed = rows
+                        .iter()
+                        .filter(|r| r.state == "completed")
+                        .count() as u8;
+                    let total_focus_secs = rows
+                        .iter()
+                        .filter(|r| r.state == "completed")
+                        .map(|r| r.duration as u32)
+                        .sum::<u32>();
+                    let ctx = solar_focus_intelligence::DaySummaryContext {
+                        date: yesterday.clone(),
+                        sessions_completed,
+                        total_focus_secs,
+                        longest_streak: sessions_completed,
+                        level: 1,
+                        xp_gained: total_focus_secs / 10,
+                        language: self.settings.language,
+                    };
+                    // Use canned summary in beta — when LlmSummarizer is wired
+                    // (Phase 3.5c) this becomes async.
+                    let text = solar_focus_intelligence::prompts::summary_canned(&ctx);
+                    return Task::done(Message::DailySummaryReady {
+                        date: yesterday,
+                        text,
+                    });
+                }
+                Task::none()
+            }
+            Message::DailySummaryReady { date, text } => {
+                if let Some(repo) = self.session_repo.as_ref() {
+                    let _ = repo.save_summary(&date, &text, "canned-v1");
+                }
+                self.recap = Some((date, text));
+                Task::none()
+            }
+            Message::DismissRecap => {
+                self.recap = None;
+                Task::none()
+            }
         }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        if self.download_modal_open {
+            return self.view_download_modal();
+        }
         if self.settings_open {
             return self.view_settings();
         }
         self.view_main()
+    }
+
+    fn view_download_modal(&self) -> Element<'_, Message> {
+        let snap = self.download_progress.lock().unwrap().clone();
+        let downloading = self.download_active.load(Ordering::Relaxed);
+
+        let (lang_title, lang_desc, lang_dl, lang_skip, lang_dl_progress, lang_verify, lang_close) =
+            match self.settings.language {
+                Language::Es => (
+                    "Descarga del modelo IA",
+                    "SolarFocus puede usar un modelo local pequeño (~1 GB) para ofrecer coaching contextual. Todo el procesamiento ocurre en tu equipo. ¿Lo descargo ahora?",
+                    "Descargar (~1 GB)",
+                    "Saltar — usar coaching básico",
+                    "Descargando…",
+                    "Verificando…",
+                    "Cerrar",
+                ),
+                Language::En => (
+                    "AI model download",
+                    "SolarFocus can use a small local model (~1 GB) for contextual coaching. All processing stays on your machine. Download now?",
+                    "Download (~1 GB)",
+                    "Skip — use basic coaching",
+                    "Downloading…",
+                    "Verifying…",
+                    "Close",
+                ),
+            };
+
+        let title = text(lang_title).size(28).color(Color::WHITE);
+        let desc = text(lang_desc)
+            .size(15)
+            .color(Color::from_rgb(0.85, 0.9, 0.85))
+            .width(Length::Fixed(560.0));
+
+        let body: Element<'_, Message> = if let Some(s) = snap {
+            // Active download
+            let pct = if s.total > 0 {
+                (s.downloaded as f64 / s.total as f64).min(1.0)
+            } else {
+                0.0
+            };
+            let mb_done = s.downloaded as f64 / 1_048_576.0;
+            let mb_total = s.total as f64 / 1_048_576.0;
+            let kbps = s.bytes_per_sec / 1024;
+            let label_state = if s.verifying {
+                lang_verify.to_string()
+            } else if downloading {
+                format!(
+                    "{} {:.1}/{:.1} MB · {} KB/s",
+                    lang_dl_progress, mb_done, mb_total, kbps
+                )
+            } else if let Some(ref e) = self.download_error {
+                format!("Error: {}", e)
+            } else {
+                format!("{:.1}/{:.1} MB", mb_done, mb_total)
+            };
+            column![
+                progress_bar(0.0..=1.0, pct as f32).width(Length::Fixed(560.0)),
+                text(label_state)
+                    .size(13)
+                    .color(Color::from_rgb(0.7, 0.85, 0.7)),
+            ]
+            .spacing(8)
+            .into()
+        } else {
+            // Initial state — offer Download / Skip
+            row![
+                button(text(lang_dl).size(15))
+                    .on_press(Message::StartModelDownload)
+                    .padding([10, 22])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.6, 0.3))),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                iced::widget::Space::with_width(12),
+                button(text(lang_skip).size(15))
+                    .on_press(Message::SkipModelDownload)
+                    .padding([10, 22])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.35, 0.32))),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+            ]
+            .into()
+        };
+
+        let close: Element<'_, Message> = if !downloading {
+            button(text(lang_close).size(13))
+                .on_press(Message::DismissDownloadModal)
+                .padding([6, 14])
+                .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
+        let content = column![title, desc, body, close]
+            .spacing(18)
+            .align_x(Horizontal::Center)
+            .max_width(640);
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .padding(40)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.04, 0.06, 0.05))),
+                ..Default::default()
+            })
+            .into()
     }
 
     fn view_main(&self) -> Element<'_, Message> {
@@ -576,8 +972,55 @@ impl App {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
         };
 
+        let recap_slot: Element<'_, Message> = if let Some((ref date, ref text_)) = self.recap {
+            let prefix = match self.settings.language {
+                Language::Es => format!("Resumen de {}", date),
+                Language::En => format!("Recap of {}", date),
+            };
+            container(
+                row![
+                    column![
+                        text(prefix)
+                            .size(13)
+                            .color(Color::from_rgb(0.6, 0.75, 0.6)),
+                        text(text_.clone())
+                            .size(14)
+                            .color(Color::from_rgb(0.9, 0.95, 0.9)),
+                    ]
+                    .spacing(4),
+                    iced::widget::horizontal_space(),
+                    button(text("×").size(13))
+                        .on_press(Message::DismissRecap)
+                        .padding([2, 8])
+                        .style(|_, _| button::Style {
+                            background: Some(iced::Background::Color(Color::from_rgb(0.20, 0.30, 0.25))),
+                            text_color: Color::WHITE,
+                            border: iced::Border {
+                                radius: 3.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                ]
+                .padding(8),
+            )
+            .padding(6)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.10, 0.20, 0.14))),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         let content = column![
             top_bar,
+            recap_slot,
             toast_slot,
             text(title).size(40).color(Color::from_rgb(0.92, 0.96, 0.92)),
             text(status_text)

@@ -132,6 +132,36 @@ impl SessionRepository {
         Ok(records)
     }
 
+    /// Sesiones para una fecha concreta (ISO YYYY-MM-DD). Usado por el
+    /// scheduler de resumen diario para procesar el día anterior.
+    pub fn sessions_for_date(&self, date: &str) -> SqlResult<Vec<SessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, start_time, duration, state FROM sessions
+             WHERE date(start_time) = ? ORDER BY start_time ASC",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![date])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            records.push(row_to_record(row)?);
+        }
+        Ok(records)
+    }
+
+    /// Resumen más reciente (para mostrar al iniciar la app).
+    pub fn latest_summary(&self) -> SqlResult<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT date, text FROM summaries ORDER BY date DESC LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+    }
+
     /// Obtiene total de sesiones completadas hoy (anonimizado)
     pub fn sessions_completed_today(&self) -> SqlResult<u32> {
         self.conn.query_row(

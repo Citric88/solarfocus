@@ -74,6 +74,12 @@ pub struct Settings {
     pub min_confidence: f32,
     #[serde(default)]
     pub user_rules_path: Option<PathBuf>,
+
+    // v1.2 Phase 3.5b — first-run download tracking.
+    // True once the user clicked "Skip" on the first-run modal so we don't
+    // ask again. Resets if they later change `model_choice`.
+    #[serde(default)]
+    pub model_download_skipped: bool,
 }
 
 fn default_true() -> bool {
@@ -106,6 +112,7 @@ impl Default for Settings {
             min_consecutive_samples: default_min_consecutive(),
             min_confidence: default_min_confidence(),
             user_rules_path: None,
+            model_download_skipped: false,
         }
     }
 }
