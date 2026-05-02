@@ -88,6 +88,8 @@ pub enum Message {
     LlmEngineLoaded(Result<(), String>),
     /// Phase 3.5c — manual debug trigger to generate today's recap now.
     GenerateRecapNow,
+    /// WIRE-1 — delete the model file currently selected.
+    DeleteModel,
 
     // Phase 3.5b — daily summary scheduler
     DailyRollCheck,
@@ -116,9 +118,12 @@ pub struct App {
     consecutive_distraction_samples: u8,
     toast: Option<Toast>,
 
-    // Phase 3.5b — download lifecycle
+    // Phase 3.5b — download lifecycle.
+    // download_progress is only *read* on llm builds; mark allow on default
+    // builds to avoid the dead_code warning.
     download_modal_open: bool,
     download_active: Arc<AtomicBool>,
+    #[allow(dead_code)]
     download_progress: Arc<StdMutex<Option<DownloadSnapshot>>>,
     download_error: Option<String>,
 
@@ -904,6 +909,31 @@ impl App {
                 self.download_modal_open = false;
                 Task::none()
             }
+            Message::DeleteModel => {
+                #[cfg(feature = "llm")]
+                {
+                    use infra::model_download::{manifest_for, model_path};
+                    if let Some(m) = manifest_for(self.settings.model_choice) {
+                        let p = model_path(m);
+                        match std::fs::remove_file(&p) {
+                            Ok(()) => {
+                                log::info!("Deleted model file: {}", p.display());
+                                self.coach = build_coach(&self.settings);
+                                self.summarizer = build_summarizer(&self.settings);
+                                self.toast = Some(Toast {
+                                    text: match self.settings.language {
+                                        Language::Es => "Modelo eliminado.".to_string(),
+                                        Language::En => "Model deleted.".to_string(),
+                                    },
+                                    expires_at: Instant::now() + Duration::from_secs(3),
+                                });
+                            }
+                            Err(e) => log::warn!("Could not delete model file: {e}"),
+                        }
+                    }
+                }
+                Task::none()
+            }
 
             Message::DailyRollCheck => {
                 let today = match today_iso_local() {
@@ -950,10 +980,6 @@ impl App {
         // UI-4: first-run wizard takes the whole window until completed.
         if self.settings.first_run && self.wizard_step != WizardStep::Done {
             return self.view_wizard();
-        }
-        // Active model download (when re-triggered from Setup) takes over too.
-        if self.download_modal_open {
-            return self.view_download_modal();
         }
 
         let status = self.status_pill();
@@ -1291,6 +1317,7 @@ impl App {
             .into()
     }
 
+    #[allow(dead_code)] // Replaced by model_download_panel embedded in wizard + Setup; kept for reference until v1.2.1.
     fn view_download_modal(&self) -> Element<'_, Message> {
         let snap = self.download_progress.lock().unwrap().clone();
         let downloading = self.download_active.load(Ordering::Relaxed);
@@ -2107,31 +2134,229 @@ impl App {
     }
 
     fn wizard_download(&self) -> Element<'_, Message> {
+        use infra::settings::RamMode;
         use ui::palette::*;
-        column![
-            text(match self.settings.language {
-                Language::Es => "Descarga del modelo IA",
-                Language::En => "AI model download",
+
+        let title = text(match self.settings.language {
+            Language::Es => "Descarga del modelo IA",
+            Language::En => "AI model download",
+        })
+        .size(FONT_TITLE)
+        .color(TEXT_PRIMARY);
+
+        // RAM mode != Full: nothing to download.
+        if self.settings.ram_mode != RamMode::Full {
+            return column![
+                title,
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Tu perfil actual no necesita descargar el modelo IA. Listo para empezar.",
+                    Language::En =>
+                        "Your current profile doesn't need the AI model download. Ready to start.",
+                })
+                .size(FONT_BODY)
+                .color(TEXT_SECONDARY),
+            ]
+            .spacing(SPACE_MD as u16)
+            .into();
+        }
+
+        column![title, self.model_download_panel()]
+            .spacing(SPACE_MD as u16)
+            .into()
+    }
+
+    /// Reusable panel that shows model presence + download progress + actions.
+    /// Used by both wizard download step and Setup → AI tab.
+    fn model_download_panel(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+
+        // When `llm` feature is off, we can't download.
+        #[cfg(not(feature = "llm"))]
+        {
+            return container(
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Esta build no incluye el LLM. Recompila con --features llm para activarlo.",
+                    Language::En =>
+                        "This build was compiled without the LLM. Rebuild with --features llm to enable.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                ..Default::default()
             })
-            .size(FONT_TITLE)
-            .color(TEXT_PRIMARY),
-            text(match (self.settings.ram_mode, self.settings.language) {
-                (infra::settings::RamMode::Full, Language::Es) =>
-                    "Tu perfil Full descarga ~1 GB de SmolLM2 después del wizard. \
-                     Si prefieres, puedes saltarlo y usar el coach básico.",
-                (infra::settings::RamMode::Full, Language::En) =>
-                    "Your Full profile downloads ~1 GB of SmolLM2 after the wizard. \
-                     You can skip and use the basic coach if you prefer.",
-                (_, Language::Es) =>
-                    "Tu perfil actual no necesita descargar el modelo IA. Listo para empezar.",
-                (_, Language::En) =>
-                    "Your current profile doesn't need the AI model download. Ready to start.",
+            .into();
+        }
+
+        #[cfg(feature = "llm")]
+        {
+            use infra::model_download::{manifest_for, model_present};
+
+            let Some(manifest) = manifest_for(self.settings.model_choice) else {
+                return text("(modelo desconocido)").size(FONT_SMALL).color(TEXT_MUTED).into();
+            };
+
+            // 1) Active download in progress.
+            let snap = self.download_progress.lock().unwrap().clone();
+            let downloading = self.download_active.load(Ordering::Relaxed);
+
+            if downloading {
+                if let Some(s) = snap {
+                    let pct = if s.total > 0 {
+                        (s.downloaded as f64 / s.total as f64).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    let mb_done = s.downloaded as f64 / 1_048_576.0;
+                    let mb_total = s.total as f64 / 1_048_576.0;
+                    let kbps = s.bytes_per_sec / 1024;
+                    let label = if s.verifying {
+                        match self.settings.language {
+                            Language::Es => "Verificando…".to_string(),
+                            Language::En => "Verifying…".to_string(),
+                        }
+                    } else {
+                        format!("{:.1}/{:.1} MB · {} KB/s", mb_done, mb_total, kbps)
+                    };
+                    return container(
+                        column![
+                            text(manifest.filename.to_string())
+                                .size(FONT_SMALL)
+                                .color(TEXT_MUTED),
+                            iced::widget::progress_bar(0.0..=1.0, pct as f32)
+                                .width(Length::Fixed(420.0)),
+                            text(label).size(FONT_SMALL).color(TEXT_SECONDARY),
+                        ]
+                        .spacing(SPACE_SM as u16),
+                    )
+                    .padding(SPACE_MD as u16)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(SURFACE)),
+                        border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                        ..Default::default()
+                    })
+                    .into();
+                }
+            }
+
+            // 2) Model already on disk.
+            if model_present(manifest) {
+                return container(
+                    iced::widget::row![
+                        column![
+                            text(format!(
+                                "{} {}",
+                                match self.settings.language {
+                                    Language::Es => "✓ Modelo presente:",
+                                    Language::En => "✓ Model present:",
+                                },
+                                manifest.filename
+                            ))
+                            .size(FONT_BODY)
+                            .color(ACCENT),
+                            text(format!(
+                                "{:.1} MB",
+                                manifest.size_bytes as f64 / 1_048_576.0
+                            ))
+                            .size(FONT_SMALL)
+                            .color(TEXT_MUTED),
+                        ]
+                        .spacing(2),
+                        iced::widget::horizontal_space(),
+                        iced::widget::button(text(match self.settings.language {
+                            Language::Es => "Re-descargar",
+                            Language::En => "Re-download",
+                        }))
+                        .on_press(Message::StartModelDownload)
+                        .padding([6, 14]),
+                        iced::widget::Space::with_width(SPACE_XS as f32),
+                        iced::widget::button(text(match self.settings.language {
+                            Language::Es => "Eliminar",
+                            Language::En => "Delete",
+                        }))
+                        .on_press(Message::DeleteModel)
+                        .padding([6, 14])
+                        .style(|_, _| iced::widget::button::Style {
+                            background: Some(iced::Background::Color(DANGER)),
+                            text_color: BG,
+                            border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
+                    ]
+                    .padding(SPACE_SM as u16),
+                )
+                .padding(SPACE_MD as u16)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                    ..Default::default()
+                })
+                .into();
+            }
+
+            // 3) Default — offer Download / Skip + show error if any.
+            let err = self.download_error.clone();
+            container(
+                column![
+                    text(format!(
+                        "{} {} (~{} MB)",
+                        match self.settings.language {
+                            Language::Es => "Modelo:",
+                            Language::En => "Model:",
+                        },
+                        manifest.filename,
+                        manifest.size_bytes / 1_048_576,
+                    ))
+                    .size(FONT_BODY)
+                    .color(TEXT_PRIMARY),
+                    text(match self.settings.language {
+                        Language::Es => "Todo el procesamiento ocurre en tu equipo.",
+                        Language::En => "All processing happens on your machine.",
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+                    iced::widget::row![
+                        iced::widget::button(text(match self.settings.language {
+                            Language::Es => "Descargar",
+                            Language::En => "Download",
+                        }))
+                        .on_press(Message::StartModelDownload)
+                        .padding([8, 18])
+                        .style(|_, _| iced::widget::button::Style {
+                            background: Some(iced::Background::Color(ACCENT)),
+                            text_color: BG,
+                            border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
+                        iced::widget::Space::with_width(SPACE_SM as f32),
+                        iced::widget::button(text(match self.settings.language {
+                            Language::Es => "Saltar",
+                            Language::En => "Skip",
+                        }))
+                        .on_press(Message::SkipModelDownload)
+                        .padding([8, 18]),
+                    ],
+                    if let Some(e) = err {
+                        text(format!("Error: {}", e)).size(FONT_SMALL).color(DANGER).into()
+                    } else {
+                        Element::from(iced::widget::Space::with_height(Length::Fixed(0.0)))
+                    },
+                ]
+                .spacing(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border { radius: 8.0.into(), ..Default::default() },
+                ..Default::default()
             })
-            .size(FONT_BODY)
-            .color(TEXT_SECONDARY),
-        ]
-        .spacing(SPACE_MD as u16)
-        .into()
+            .into()
+        }
     }
 
     /// Legacy AI-tab content. UI-4 wraps this with view_setup_tabs.
@@ -2239,16 +2464,7 @@ impl App {
         ]
         .padding(8);
 
-        // Phase 4 — feedback summary line.
-        let (up, down) = self
-            .session_repo
-            .as_ref()
-            .and_then(|r| r.feedback_counts().ok())
-            .unwrap_or((0, 0));
-        let feedback_summary = text(format!("Coaching feedback: 👍 {} · 👎 {}", up, down))
-            .size(13)
-            .color(Color::from_rgb(0.7, 0.85, 0.7));
-
+        // Feedback summary moved to Coach canvas in WIRE-1.
         let thresholds = text(format!(
             "Umbral conf={:.2}  ·  muestras consecutivas={}  ·  poll={}s",
             self.settings.min_confidence,
@@ -2284,6 +2500,15 @@ impl App {
                 ..Default::default()
             });
 
+        // WIRE-1: Modelo IA card — uses the unified model_download_panel.
+        let model_card_label = text(match self.settings.language {
+            Language::Es => "Estado del modelo",
+            Language::En => "Model status",
+        })
+        .size(13)
+        .color(Color::from_rgb(0.7, 0.8, 0.7));
+        let model_card = self.model_download_panel();
+
         let content = column![
             title,
             ai_toggle,
@@ -2291,22 +2516,21 @@ impl App {
             lang_row,
             classifier_row,
             model_row,
+            model_card_label,
+            model_card,
             ram_row,
             thresholds,
-            feedback_summary,
             recap_now,
             close,
         ]
         .spacing(12)
-        .align_x(Horizontal::Center)
         .max_width(620);
 
+        // Note: Length::Shrink height (default) so this can sit inside the
+        // tabbed Setup canvas without violating any parent constraints.
+
         container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .padding(40)
+            .padding(20)
             .style(|_| container::Style {
                 background: Some(iced::Background::Color(Color::from_rgb(0.04, 0.06, 0.05))),
                 ..Default::default()
