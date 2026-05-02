@@ -25,6 +25,10 @@ pub mod llm;
 #[cfg(feature = "llm")]
 pub mod llm_coach;
 
+// 🧠 v1.2 Phase 4: ONNX classifier (feature-gated)
+#[cfg(feature = "classifier")]
+pub mod onnx_classifier;
+
 use chrono::Utc;
 
 /// Inicializa el logger global con stdout + archivo

@@ -60,6 +60,12 @@ pub enum Message {
     DismissToast,
     ToastTick, // periodic check to expire toasts
 
+    // Phase 4 — model picker + thumbs feedback + RAM mode
+    SetModelChoice(infra::settings::ModelChoice),
+    SetRamMode(infra::settings::RamMode),
+    ThumbsUp,
+    ThumbsDown,
+
     // Phase 3.5b — model download flow
     StartModelDownload,
     SkipModelDownload,
@@ -731,6 +737,66 @@ impl App {
                 let target = today_iso_local().unwrap_or_else(|| "today".into());
                 self.dispatch_summary_for(target)
             }
+            Message::SetModelChoice(choice) => {
+                if self.settings.model_choice != choice {
+                    self.settings.model_choice = choice;
+                    // Resetting `model_download_skipped` lets the modal
+                    // re-prompt for the newly chosen model file.
+                    self.settings.model_download_skipped = false;
+                    self.settings.save();
+                    log::info!("Model choice → {:?}", choice);
+                    self.toast = Some(Toast {
+                        text: match self.settings.language {
+                            Language::Es => format!("Modelo: {:?} (reinicia para aplicar)", choice),
+                            Language::En => format!("Model: {:?} (restart to apply)", choice),
+                        },
+                        expires_at: Instant::now() + Duration::from_secs(5),
+                    });
+                }
+                Task::none()
+            }
+            Message::SetRamMode(mode) => {
+                self.settings.ram_mode = mode;
+                self.settings.apply_ram_mode();
+                self.settings.save();
+                self.rebuild_classifier();
+                self.coach = build_coach(&self.settings);
+                self.summarizer = build_summarizer(&self.settings);
+                log::info!("RAM mode → {:?} (applied)", mode);
+                Task::none()
+            }
+            Message::ThumbsUp | Message::ThumbsDown => {
+                let rating = if matches!(message, Message::ThumbsUp) { 1 } else { -1 };
+                let trigger = "session"; // generic — could differentiate per CoachingTrigger later
+                let msg_text = self.last_coaching.clone().unwrap_or_default();
+                if msg_text.is_empty() {
+                    return Task::none();
+                }
+                let model_id = if cfg!(feature = "llm") && self.settings.ai_enabled {
+                    match self.settings.model_choice {
+                        infra::settings::ModelChoice::SmolLM2 => "smollm2-1.7b-instruct-q4_k_m",
+                        infra::settings::ModelChoice::Llama1B => "llama-3.2-1b-instruct-q4_k_m",
+                        infra::settings::ModelChoice::Qwen15 => "qwen2.5-1.5b-instruct-q4_k_m",
+                    }
+                } else {
+                    "mock"
+                };
+                if let Some(repo) = self.session_repo.as_ref() {
+                    if let Err(e) = repo.save_feedback(trigger, &msg_text, rating, model_id) {
+                        log::warn!("save_feedback failed: {e}");
+                    }
+                }
+                self.toast = Some(Toast {
+                    text: match (rating, self.settings.language) {
+                        (1, Language::Es) => "Gracias 👍".to_string(),
+                        (1, Language::En) => "Thanks 👍".to_string(),
+                        (_, Language::Es) => "Anotado 👎".to_string(),
+                        (_, Language::En) => "Noted 👎".to_string(),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(2),
+                });
+                Task::none()
+            }
             Message::DismissDownloadModal => {
                 self.download_modal_open = false;
                 Task::none()
@@ -981,12 +1047,40 @@ impl App {
 
         let buttons_col = column(buttons).spacing(10).align_x(Horizontal::Center);
 
-        // Coaching slot (Phase 1: MockCoach output)
+        // Coaching slot + thumbs (Phase 4 feedback)
         let coaching_slot: Element<'_, Message> = if let Some(ref c) = self.last_coaching {
-            text(c.clone())
-                .size(18)
-                .color(Color::from_rgb(0.85, 0.95, 0.85))
-                .into()
+            row![
+                text(c.clone())
+                    .size(18)
+                    .color(Color::from_rgb(0.85, 0.95, 0.85)),
+                iced::widget::Space::with_width(12),
+                button(text("👍").size(14))
+                    .on_press(Message::ThumbsUp)
+                    .padding([3, 8])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.18, 0.30, 0.22))),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            radius: 3.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                iced::widget::Space::with_width(4),
+                button(text("👎").size(14))
+                    .on_press(Message::ThumbsDown)
+                    .padding([3, 8])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.18, 0.18))),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            radius: 3.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+            ]
+            .into()
         } else {
             text("").size(18).into()
         };
@@ -1212,8 +1306,61 @@ impl App {
             button(text("Rules").size(14))
                 .on_press(Message::SetClassifierMode(ClassifierMode::Rules))
                 .padding([6, 14]),
+            iced::widget::Space::with_width(8),
+            button(text("DistilBERT").size(14))
+                .on_press(Message::SetClassifierMode(ClassifierMode::Distilbert))
+                .padding([6, 14]),
         ]
         .padding(8);
+
+        use infra::settings::{ModelChoice, RamMode};
+        let model_row = row![
+            text(format!("Modelo IA: {:?}", self.settings.model_choice))
+                .size(18)
+                .color(Color::WHITE),
+            iced::widget::horizontal_space(),
+            button(text("SmolLM2").size(14))
+                .on_press(Message::SetModelChoice(ModelChoice::SmolLM2))
+                .padding([6, 14]),
+            iced::widget::Space::with_width(8),
+            button(text("Llama1B").size(14))
+                .on_press(Message::SetModelChoice(ModelChoice::Llama1B))
+                .padding([6, 14]),
+            iced::widget::Space::with_width(8),
+            button(text("Qwen15").size(14))
+                .on_press(Message::SetModelChoice(ModelChoice::Qwen15))
+                .padding([6, 14]),
+        ]
+        .padding(8);
+
+        let ram_row = row![
+            text(format!("Modo RAM: {:?}", self.settings.ram_mode))
+                .size(18)
+                .color(Color::WHITE),
+            iced::widget::horizontal_space(),
+            button(text("Low").size(14))
+                .on_press(Message::SetRamMode(RamMode::Low))
+                .padding([6, 14]),
+            iced::widget::Space::with_width(8),
+            button(text("Normal").size(14))
+                .on_press(Message::SetRamMode(RamMode::Normal))
+                .padding([6, 14]),
+            iced::widget::Space::with_width(8),
+            button(text("Full").size(14))
+                .on_press(Message::SetRamMode(RamMode::Full))
+                .padding([6, 14]),
+        ]
+        .padding(8);
+
+        // Phase 4 — feedback summary line.
+        let (up, down) = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.feedback_counts().ok())
+            .unwrap_or((0, 0));
+        let feedback_summary = text(format!("Coaching feedback: 👍 {} · 👎 {}", up, down))
+            .size(13)
+            .color(Color::from_rgb(0.7, 0.85, 0.7));
 
         let thresholds = text(format!(
             "Umbral conf={:.2}  ·  muestras consecutivas={}  ·  poll={}s",
@@ -1256,13 +1403,16 @@ impl App {
             watch_toggle,
             lang_row,
             classifier_row,
+            model_row,
+            ram_row,
             thresholds,
+            feedback_summary,
             recap_now,
             close,
         ]
         .spacing(12)
         .align_x(Horizontal::Center)
-        .max_width(560);
+        .max_width(620);
 
         container(content)
             .width(Length::Fill)
@@ -1368,8 +1518,22 @@ fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
             Arc::new(RulesClassifier::bundled_with_user_override(&path))
         }
         ClassifierMode::Distilbert => {
-            // Phase 4 — falls back to rules until ONNX runtime ships.
-            log::warn!("ClassifierMode::Distilbert not yet implemented — falling back to rules");
+            #[cfg(feature = "classifier")]
+            {
+                use infra::onnx_classifier::OnnxClassifier;
+                match OnnxClassifier::try_load() {
+                    Ok(c) => return Arc::new(c),
+                    Err(e) => {
+                        log::warn!("DistilBERT unavailable ({e}) — falling back to rules");
+                    }
+                }
+            }
+            #[cfg(not(feature = "classifier"))]
+            {
+                log::warn!(
+                    "ClassifierMode::Distilbert requested but binary built without `classifier` feature — falling back to rules"
+                );
+            }
             let path = settings.effective_rules_path();
             Arc::new(RulesClassifier::bundled_with_user_override(&path))
         }

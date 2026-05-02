@@ -60,7 +60,49 @@ impl SessionRepository {
             [],
         )?;
 
+        // v1.2 Phase 4 — opt-in coaching feedback (thumbs up/down).
+        // Stored locally only — never sent anywhere.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS coaching_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                trigger TEXT NOT NULL,
+                message TEXT NOT NULL,
+                rating INTEGER NOT NULL,        -- +1 or -1
+                model_id TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(Self { conn })
+    }
+
+    pub fn save_feedback(
+        &self,
+        trigger: &str,
+        message: &str,
+        rating: i32,
+        model_id: &str,
+    ) -> SqlResult<u64> {
+        self.conn.execute(
+            "INSERT INTO coaching_feedback (trigger, message, rating, model_id) VALUES (?, ?, ?, ?)",
+            rusqlite::params![trigger, message, rating, model_id],
+        )?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    pub fn feedback_counts(&self) -> SqlResult<(u32, u32)> {
+        let up: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM coaching_feedback WHERE rating > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        let down: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM coaching_feedback WHERE rating < 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok((up, down))
     }
 
     /// Phase 3 — store / fetch daily summaries.

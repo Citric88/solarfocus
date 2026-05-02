@@ -44,6 +44,24 @@ pub enum ClassifierMode {
     Distilbert,
 }
 
+/// Phase 4 — coarse RAM-budget profile that the App uses to derive
+/// derived flags (ai_enabled, window_watch_enabled, classifier_mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RamMode {
+    /// ≤ 50 MB — timer only, no AI, no window watch.
+    Low,
+    /// ≤ 120 MB — classifier + window watch, no LLM.
+    Normal,
+    /// ≤ 1.5 GB — full AI, classifier, window watch.
+    Full,
+}
+
+impl Default for RamMode {
+    fn default() -> Self {
+        RamMode::Normal
+    }
+}
+
 impl Default for ClassifierMode {
     fn default() -> Self {
         ClassifierMode::Mock
@@ -80,6 +98,10 @@ pub struct Settings {
     // ask again. Resets if they later change `model_choice`.
     #[serde(default)]
     pub model_download_skipped: bool,
+
+    // v1.2 Phase 4 — coarse RAM budget profile.
+    #[serde(default)]
+    pub ram_mode: RamMode,
 }
 
 fn default_true() -> bool {
@@ -113,11 +135,36 @@ impl Default for Settings {
             min_confidence: default_min_confidence(),
             user_rules_path: None,
             model_download_skipped: false,
+            ram_mode: RamMode::default(),
         }
     }
 }
 
 impl Settings {
+    /// Apply the implications of a RAM-mode change to dependent flags.
+    /// Caller must persist via `save()` afterwards.
+    pub fn apply_ram_mode(&mut self) {
+        match self.ram_mode {
+            RamMode::Low => {
+                self.ai_enabled = false;
+                self.window_watch_enabled = false;
+                self.classifier_mode = ClassifierMode::Mock;
+            }
+            RamMode::Normal => {
+                self.ai_enabled = false;
+                self.window_watch_enabled = true;
+                self.classifier_mode = ClassifierMode::Rules;
+            }
+            RamMode::Full => {
+                self.ai_enabled = true;
+                self.window_watch_enabled = true;
+                if matches!(self.classifier_mode, ClassifierMode::Mock) {
+                    self.classifier_mode = ClassifierMode::Rules;
+                }
+            }
+        }
+    }
+
     /// Path the App uses to look up user-overridden rules.toml. Defaults to
     /// `<config_dir>/SolarFocus/rules.toml` when not explicitly set.
     pub fn effective_rules_path(&self) -> PathBuf {

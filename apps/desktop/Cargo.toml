@@ -25,6 +25,11 @@ reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
+# Phase 4 — ONNX classifier tier (feature-gated)
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+
 [features]
 default = []
 # Enabling `llm` pulls in llama-cpp-2 (C++ build, ~2-3 min cold) + the
@@ -32,8 +37,9 @@ default = []
 llm = ["dep:llama-cpp-2", "dep:reqwest", "dep:sha2", "dep:futures-util"]
 gpu-metal = ["llm", "llama-cpp-2/metal"]
 gpu-cuda = ["llm", "llama-cpp-2/cuda"]
-# Phase 4 placeholder — ONNX classifier.
-classifier = []
+# Phase 4 — DistilBERT-INT8 ONNX classifier. Falls back to RulesClassifier
+# at runtime if the ONNX file is missing on disk.
+classifier = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
 
 [[bin]]
 name = "solarfocus-desktop"
