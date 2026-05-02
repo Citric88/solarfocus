@@ -48,7 +48,42 @@ impl SessionRepository {
             [],
         )?;
 
+        // v1.2 Phase 3 — daily LLM-generated summaries.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL UNIQUE,
+                text TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                generated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+
         Ok(Self { conn })
+    }
+
+    /// Phase 3 — store / fetch daily summaries.
+    pub fn save_summary(&self, date: &str, text: &str, model_id: &str) -> SqlResult<u64> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO summaries (date, text, model_id) VALUES (?, ?, ?)",
+            rusqlite::params![date, text, model_id],
+        )?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    pub fn get_summary(&self, date: &str) -> SqlResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT text FROM summaries WHERE date = ?",
+                rusqlite::params![date],
+                |row| row.get::<_, String>(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
     }
 
     /// Resuelve la ruta del DB según OS (#21)

@@ -17,11 +17,22 @@ active-win-pos-rs = { workspace = true }
 tokio = { workspace = true }
 solar-focus-core = { path = "../../crates/core-domain" }
 solar-focus-intelligence = { path = "../../crates/intelligence" }
+thiserror = "1"
+
+# Phase 3 — LLM tier (feature-gated)
+llama-cpp-2 = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [features]
 default = []
-# Phase 3 / 4 placeholders — keep cargo paths stable.
-llm = []
+# Enabling `llm` pulls in llama-cpp-2 (C++ build, ~2-3 min cold) + the
+# model download stack. Without it, App falls back to MockCoach.
+llm = ["dep:llama-cpp-2", "dep:reqwest", "dep:sha2", "dep:futures-util"]
+gpu-metal = ["llm", "llama-cpp-2/metal"]
+gpu-cuda = ["llm", "llama-cpp-2/cuda"]
+# Phase 4 placeholder — ONNX classifier.
 classifier = []
 
 [[bin]]

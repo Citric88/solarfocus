@@ -17,6 +17,14 @@ pub mod window_watch;
 // ⚙️ v1.2: settings JSON persistidos
 pub mod settings;
 
+// 🧠 v1.2 Phase 3: LLM tier (feature-gated)
+#[cfg(feature = "llm")]
+pub mod model_download;
+#[cfg(feature = "llm")]
+pub mod llm;
+#[cfg(feature = "llm")]
+pub mod llm_coach;
+
 use chrono::Utc;
 
 /// Inicializa el logger global con stdout + archivo

@@ -94,15 +94,16 @@ impl App {
         };
 
         let settings = Settings::load();
-        let coach: Arc<dyn Coach> = Arc::new(MockCoach);
+        let coach = build_coach(&settings);
         let classifier = build_classifier(&settings);
 
         log::info!(
-            "v1.2.0-beta1 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}",
+            "v1.2.0-beta2 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
             settings.ai_enabled,
             settings.language,
             settings.window_poll_secs,
-            settings.classifier_mode
+            settings.classifier_mode,
+            coach.is_ready(),
         );
 
         (
@@ -724,6 +725,49 @@ fn on_off(b: bool) -> &'static str {
     } else {
         "OFF"
     }
+}
+
+/// Select the active Coach based on settings + compile-time `llm` feature
+/// + whether a model file is on disk. Falls back to MockCoach gracefully.
+fn build_coach(settings: &Settings) -> Arc<dyn Coach> {
+    if !settings.ai_enabled {
+        log::info!("AI disabled in settings → using MockCoach");
+        return Arc::new(MockCoach);
+    }
+
+    #[cfg(feature = "llm")]
+    {
+        use infra::llm::{LlmRuntime, LoadOpts};
+        use infra::llm_coach::LlmCoach;
+        use infra::model_download::{manifest_for, model_path, model_present};
+
+        if let Some(manifest) = manifest_for(settings.model_choice) {
+            if model_present(manifest) {
+                let path = model_path(manifest);
+                log::info!("Loading LLM from {} (this may take a few seconds)", path.display());
+                // Block on load. Done at startup, so OK.
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()
+                    .and_then(|rt| {
+                        rt.block_on(async { LlmRuntime::load(&path, LoadOpts::default()).await }).ok()
+                    });
+                if let Some(rt) = rt {
+                    log::info!("LLM ready — using LlmCoach");
+                    return Arc::new(LlmCoach::new(Arc::new(rt)));
+                }
+                log::warn!("LLM failed to load — falling back to MockCoach");
+            } else {
+                log::info!(
+                    "Model file {} not present — falling back to MockCoach (run downloader first)",
+                    manifest.filename
+                );
+            }
+        }
+    }
+
+    Arc::new(MockCoach)
 }
 
 fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
