@@ -11,3 +11,5 @@ authors = ["SolarFocus Team"]
 serde = { workspace = true, features = ["derive"] }
 solar-focus-core = { path = "../core-domain" }
 thiserror = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+log = { workspace = true }

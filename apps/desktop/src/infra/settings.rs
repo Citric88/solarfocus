@@ -60,12 +60,20 @@ pub struct Settings {
     pub coaching_tone: CoachingTone,
     #[serde(default)]
     pub model_choice: ModelChoice,
-    #[serde(default)]
+    #[serde(default = "default_classifier_mode")]
     pub classifier_mode: ClassifierMode,
     #[serde(default = "default_true")]
     pub window_watch_enabled: bool,
     #[serde(default = "default_poll")]
     pub window_poll_secs: u8,
+
+    // v1.2 Phase 2 — distraction detection knobs
+    #[serde(default = "default_min_consecutive")]
+    pub min_consecutive_samples: u8,
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence: f32,
+    #[serde(default)]
+    pub user_rules_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -73,6 +81,16 @@ fn default_true() -> bool {
 }
 fn default_poll() -> u8 {
     10
+}
+fn default_classifier_mode() -> ClassifierMode {
+    // v1.2.0-beta1: Rules is the new sensible default.
+    ClassifierMode::Rules
+}
+fn default_min_consecutive() -> u8 {
+    2
+}
+fn default_min_confidence() -> f32 {
+    0.7
 }
 
 impl Default for Settings {
@@ -82,9 +100,27 @@ impl Default for Settings {
             ai_enabled: true,
             coaching_tone: CoachingTone::default(),
             model_choice: ModelChoice::default(),
-            classifier_mode: ClassifierMode::default(),
+            classifier_mode: default_classifier_mode(),
             window_watch_enabled: true,
             window_poll_secs: 10,
+            min_consecutive_samples: default_min_consecutive(),
+            min_confidence: default_min_confidence(),
+            user_rules_path: None,
+        }
+    }
+}
+
+impl Settings {
+    /// Path the App uses to look up user-overridden rules.toml. Defaults to
+    /// `<config_dir>/SolarFocus/rules.toml` when not explicitly set.
+    pub fn effective_rules_path(&self) -> PathBuf {
+        if let Some(ref p) = self.user_rules_path {
+            return p.clone();
+        }
+        if let Some(p) = ProjectDirs::from("os", "SolarFocus", "SolarFocus") {
+            p.config_dir().join("rules.toml")
+        } else {
+            PathBuf::from("rules.toml")
         }
     }
 }

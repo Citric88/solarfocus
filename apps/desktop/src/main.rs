@@ -15,16 +15,18 @@ use iced::{Color, Element, Length, Subscription, Task, window};
 pub use solar_focus_core as SolarFocusCore;
 
 use solar_focus_intelligence::{
-    ClassificationResult, Coach, CoachingTrigger, DistractionClassifier, FocusContext,
-    Language, MockClassifier, MockCoach,
+    ClassificationLabel, ClassificationResult, Coach, CoachingTrigger, DistractionClassifier,
+    FocusContext, Language, MockClassifier, MockCoach, RulesClassifier,
 };
+use solar_focus_core::focus_rules::FocusRulesEngine;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 mod infra;
 
 use chrono::Utc;
 use infra::persistence::SessionRepository;
-use infra::settings::Settings;
+use infra::settings::{ClassifierMode, Settings};
 use infra::window_watch::WindowWatcher;
 
 #[derive(Debug, Clone)]
@@ -45,6 +47,12 @@ pub enum Message {
     ToggleAi(bool),
     ToggleWindowWatch(bool),
     SetLanguage(Language),
+
+    // Phase 2 additions
+    SetClassifierMode(ClassifierMode),
+    ShowToast { text: String, expires_in_secs: u64 },
+    DismissToast,
+    ToastTick, // periodic check to expire toasts
 }
 
 pub struct App {
@@ -60,7 +68,18 @@ pub struct App {
     last_classification: Option<ClassificationResult>,
     sessions_today: u8,
     settings_open: bool,
-    session_started_at: Option<std::time::Instant>,
+    session_started_at: Option<Instant>,
+
+    // Phase 2 fields
+    focus_rules: FocusRulesEngine,
+    consecutive_distraction_samples: u8,
+    toast: Option<Toast>,
+}
+
+#[derive(Debug, Clone)]
+struct Toast {
+    text: String,
+    expires_at: Instant,
 }
 
 impl App {
@@ -76,13 +95,14 @@ impl App {
 
         let settings = Settings::load();
         let coach: Arc<dyn Coach> = Arc::new(MockCoach);
-        let classifier: Arc<dyn DistractionClassifier> = Arc::new(MockClassifier);
+        let classifier = build_classifier(&settings);
 
         log::info!(
-            "v1.2.0-alpha boot — ai_enabled={}, language={:?}, poll={}s",
+            "v1.2.0-beta1 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}",
             settings.ai_enabled,
             settings.language,
-            settings.window_poll_secs
+            settings.window_poll_secs,
+            settings.classifier_mode
         );
 
         (
@@ -98,9 +118,17 @@ impl App {
                 sessions_today: 0,
                 settings_open: false,
                 session_started_at: None,
+                focus_rules: FocusRulesEngine::new(),
+                consecutive_distraction_samples: 0,
+                toast: None,
             },
             Task::none(),
         )
+    }
+
+    fn rebuild_classifier(&mut self) {
+        self.classifier = build_classifier(&self.settings);
+        log::info!("Classifier rebuilt: mode={:?}", self.settings.classifier_mode);
     }
 
     pub fn title(&self) -> String {
@@ -132,7 +160,7 @@ impl App {
             )
         {
             subs.push(
-                iced::time::every(std::time::Duration::from_millis(100))
+                iced::time::every(Duration::from_millis(100))
                     .map(|_| Message::TimerTick(0.1)),
             );
         }
@@ -145,9 +173,13 @@ impl App {
         {
             let secs = self.settings.window_poll_secs.max(1) as u64;
             subs.push(
-                iced::time::every(std::time::Duration::from_secs(secs))
-                    .map(|_| Message::WindowProbe),
+                iced::time::every(Duration::from_secs(secs)).map(|_| Message::WindowProbe),
             );
+        }
+
+        // Toast lifecycle ticks at 1 Hz while a toast is showing.
+        if self.toast.is_some() {
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::ToastTick));
         }
 
         Subscription::batch(subs)
@@ -277,8 +309,44 @@ impl App {
                     c.confidence,
                     c.matched_rule
                 );
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+
+                if c.label == ClassificationLabel::Distraction
+                    && c.confidence >= self.settings.min_confidence
+                {
+                    self.consecutive_distraction_samples =
+                        self.consecutive_distraction_samples.saturating_add(1);
+                    if self.consecutive_distraction_samples >= self.settings.min_consecutive_samples
+                    {
+                        self.focus_rules.record_distraction();
+                        log::warn!(
+                            "Distraction confirmed (consecutive={}, rule={:?})",
+                            self.consecutive_distraction_samples,
+                            c.matched_rule
+                        );
+                        let toast_text = match self.settings.language {
+                            Language::Es => match &c.matched_rule {
+                                Some(r) => format!("Distracción detectada ({}). ¿Pausa o vuelves?", r),
+                                None => "Distracción detectada. ¿Pausa o vuelves?".to_string(),
+                            },
+                            Language::En => match &c.matched_rule {
+                                Some(r) => format!("Distraction detected ({}). Pause or refocus?", r),
+                                None => "Distraction detected. Pause or refocus?".to_string(),
+                            },
+                        };
+                        tasks.push(Task::done(Message::ShowToast {
+                            text: toast_text,
+                            expires_in_secs: 4,
+                        }));
+                        self.consecutive_distraction_samples = 0;
+                    }
+                } else {
+                    // Streak broken — reset the gate
+                    self.consecutive_distraction_samples = 0;
+                }
+
                 self.last_classification = Some(c);
-                Task::none()
+                Task::batch(tasks)
             }
             Message::CoachingReady(s) => {
                 if !s.is_empty() {
@@ -306,6 +374,29 @@ impl App {
             }
             Message::SetLanguage(lang) => {
                 self.settings.language = lang;
+                Task::none()
+            }
+            Message::SetClassifierMode(mode) => {
+                self.settings.classifier_mode = mode;
+                self.rebuild_classifier();
+                Task::none()
+            }
+            Message::ShowToast { text, expires_in_secs } => {
+                let expires_at = Instant::now() + Duration::from_secs(expires_in_secs);
+                log::info!("Toast: {} (TTL {}s)", text, expires_in_secs);
+                self.toast = Some(Toast { text, expires_at });
+                Task::none()
+            }
+            Message::DismissToast => {
+                self.toast = None;
+                Task::none()
+            }
+            Message::ToastTick => {
+                if let Some(t) = &self.toast {
+                    if Instant::now() >= t.expires_at {
+                        self.toast = None;
+                    }
+                }
                 Task::none()
             }
         }
@@ -446,8 +537,47 @@ impl App {
         .padding(10)
         .into();
 
+        // Toast banner (Phase 2). Only renders when self.toast is Some.
+        let toast_slot: Element<'_, Message> = if let Some(ref t) = self.toast {
+            container(
+                row![
+                    text(t.text.clone())
+                        .size(14)
+                        .color(Color::from_rgb(0.05, 0.05, 0.05)),
+                    iced::widget::horizontal_space(),
+                    button(text("×").size(14))
+                        .on_press(Message::DismissToast)
+                        .padding([2, 8])
+                        .style(|_, _| button::Style {
+                            background: Some(iced::Background::Color(Color::from_rgb(0.95, 0.85, 0.4))),
+                            text_color: Color::from_rgb(0.05, 0.05, 0.05),
+                            border: iced::Border {
+                                radius: 3.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                ]
+                .padding(6),
+            )
+            .padding(8)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.99, 0.91, 0.55))),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            // iced 0.13 + cosmic-text panics on size 0; use an empty space instead.
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         let content = column![
             top_bar,
+            toast_slot,
             text(title).size(40).color(Color::from_rgb(0.92, 0.96, 0.92)),
             text(status_text)
                 .size(28)
@@ -521,6 +651,33 @@ impl App {
         ]
         .padding(8);
 
+        let classifier_row = row![
+            text(format!(
+                "Clasificador: {:?}",
+                self.settings.classifier_mode
+            ))
+            .size(18)
+            .color(Color::WHITE),
+            iced::widget::horizontal_space(),
+            button(text("Mock").size(14))
+                .on_press(Message::SetClassifierMode(ClassifierMode::Mock))
+                .padding([6, 14]),
+            iced::widget::Space::with_width(8),
+            button(text("Rules").size(14))
+                .on_press(Message::SetClassifierMode(ClassifierMode::Rules))
+                .padding([6, 14]),
+        ]
+        .padding(8);
+
+        let thresholds = text(format!(
+            "Umbral conf={:.2}  ·  muestras consecutivas={}  ·  poll={}s",
+            self.settings.min_confidence,
+            self.settings.min_consecutive_samples,
+            self.settings.window_poll_secs,
+        ))
+        .size(13)
+        .color(Color::from_rgb(0.7, 0.75, 0.7));
+
         let close = button(text("Guardar y cerrar").size(16))
             .on_press(Message::CloseSettings)
             .padding([10, 24])
@@ -534,10 +691,18 @@ impl App {
                 ..Default::default()
             });
 
-        let content = column![title, ai_toggle, watch_toggle, lang_row, close]
-            .spacing(12)
-            .align_x(Horizontal::Center)
-            .max_width(560);
+        let content = column![
+            title,
+            ai_toggle,
+            watch_toggle,
+            lang_row,
+            classifier_row,
+            thresholds,
+            close,
+        ]
+        .spacing(12)
+        .align_x(Horizontal::Center)
+        .max_width(560);
 
         container(content)
             .width(Length::Fill)
@@ -558,6 +723,22 @@ fn on_off(b: bool) -> &'static str {
         "ON"
     } else {
         "OFF"
+    }
+}
+
+fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
+    match settings.classifier_mode {
+        ClassifierMode::Mock => Arc::new(MockClassifier),
+        ClassifierMode::Rules => {
+            let path = settings.effective_rules_path();
+            Arc::new(RulesClassifier::bundled_with_user_override(&path))
+        }
+        ClassifierMode::Distilbert => {
+            // Phase 4 — falls back to rules until ONNX runtime ships.
+            log::warn!("ClassifierMode::Distilbert not yet implemented — falling back to rules");
+            let path = settings.effective_rules_path();
+            Arc::new(RulesClassifier::bundled_with_user_override(&path))
+        }
     }
 }
 

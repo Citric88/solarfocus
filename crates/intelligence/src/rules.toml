@@ -1,0 +1,87 @@
+# SolarFocus — bundled distraction-classification rules.
+# Process names are matched case-insensitively against active-win-pos-rs's
+# `app_name`. Title keywords are substring matches against the lowercased
+# window title. User rules at <config_dir>/SolarFocus/rules.toml override
+# these (entries merged additively; user wins on conflict).
+
+[focus]
+processes = [
+    "Code",
+    "Visual Studio Code",
+    "Cursor",
+    "Xcode",
+    "Terminal",
+    "iTerm2",
+    "iTerm",
+    "kitty",
+    "Alacritty",
+    "Ghostty",
+    "WezTerm",
+    "Obsidian",
+    "Notion",
+    "Figma",
+    "Sketch",
+    "Affinity Designer",
+    "Rider",
+    "IntelliJ IDEA",
+    "PyCharm",
+    "WebStorm",
+    "GoLand",
+    "Sublime Text",
+    "Neovim",
+    "MacVim",
+    "Vim",
+    "Emacs",
+    "Zed",
+    "RStudio",
+    "Spyder",
+    "Jupyter",
+    "Postman",
+    "Insomnia",
+    "TablePlus",
+    "DBeaver",
+    "DataGrip",
+    "Linear",
+    "Bear",
+    "Logseq",
+    "Things",
+    "OmniFocus",
+    "Trello",
+    "Asana",
+]
+title_keywords = []
+
+[distraction]
+processes = [
+    "TikTok",
+    "Instagram",
+    "Twitter",
+    "X",
+    "Discord",
+    "Steam",
+    "WhatsApp",
+    "Telegram",
+    "Messenger",
+    "Reddit",
+    "YouTube",
+    "Netflix",
+    "Spotify",
+    "Apple Music",
+    "Twitch",
+    "Snapchat",
+    "Threads",
+    "BlueSky",
+]
+title_keywords = [
+    "youtube.com/watch",
+    "twitter.com",
+    "x.com/",
+    "reddit.com/r/",
+    "tiktok.com",
+    "instagram.com",
+    "facebook.com",
+    "netflix.com/watch",
+    "twitch.tv/",
+    "9gag.com",
+    "buzzfeed.com",
+]

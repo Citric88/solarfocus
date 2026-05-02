@@ -10,7 +10,9 @@ pub mod traits;
 pub mod types;
 pub mod prompts;
 pub mod mock;
+pub mod rules;
 
 pub use traits::{AiError, AiFuture, AiResult, Coach, DistractionClassifier, Summarizer};
 pub use types::*;
 pub use mock::{MockCoach, MockClassifier, MockSummarizer};
+pub use rules::{RulesClassifier, RulesError};
