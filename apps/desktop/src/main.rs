@@ -29,6 +29,9 @@ use std::time::{Duration, Instant};
 use infra::model_download::DownloadEvent;
 
 mod infra;
+mod ui;
+
+use ui::sidebar::{Route, StatusPill};
 
 use chrono::Utc;
 use infra::persistence::SessionRepository;
@@ -65,6 +68,9 @@ pub enum Message {
     SetRamMode(infra::settings::RamMode),
     ThumbsUp,
     ThumbsDown,
+
+    // UI-1 — route navigation
+    SwitchRoute(Route),
 
     // Phase 3.5b — model download flow
     StartModelDownload,
@@ -113,6 +119,9 @@ pub struct App {
     // Phase 3.5b — daily summary scheduler
     last_summary_date: Option<String>, // ISO YYYY-MM-DD of the last day we summarized
     recap: Option<(String, String)>,   // (date, text) — shown as a card if Some
+
+    // UI-1 — current canvas route
+    route: Route,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +204,7 @@ impl App {
                 download_error: None,
                 last_summary_date: today_iso_local(),
                 recap,
+                route: Route::default(),
             },
             Task::none(),
         )
@@ -446,6 +456,25 @@ impl App {
 
         // Daily roll-over check: once per minute, always on.
         subs.push(iced::time::every(Duration::from_secs(60)).map(|_| Message::DailyRollCheck));
+
+        // UI-1 — keyboard shortcuts.
+        subs.push(iced::keyboard::on_key_press(|key, _modifiers| {
+            use iced::keyboard::key::{Key, Named};
+            match key.as_ref() {
+                Key::Named(Named::Space) => Some(Message::Pause),
+                Key::Character("r") | Key::Character("R") => Some(Message::Resume),
+                Key::Character("p") | Key::Character("P") => Some(Message::Pause),
+                Key::Character("b") | Key::Character("B") => Some(Message::TakeBreak),
+                Key::Character("s") | Key::Character("S") => {
+                    Some(Message::SwitchRoute(Route::Setup))
+                }
+                Key::Character("1") => Some(Message::SwitchRoute(Route::Focus)),
+                Key::Character("2") => Some(Message::SwitchRoute(Route::Stats)),
+                Key::Character("3") => Some(Message::SwitchRoute(Route::Coach)),
+                Key::Character("4") => Some(Message::SwitchRoute(Route::Setup)),
+                _ => None,
+            }
+        }));
 
         Subscription::batch(subs)
     }
@@ -765,6 +794,19 @@ impl App {
                 log::info!("RAM mode → {:?} (applied)", mode);
                 Task::none()
             }
+            Message::SwitchRoute(r) => {
+                if r != self.route {
+                    log::info!("Route → {:?}", r);
+                    self.route = r;
+                    // Closing settings_open ensures the legacy settings modal
+                    // doesn't shadow the new Setup canvas. Same for the
+                    // download modal — only stays for first-run.
+                    if self.route != Route::Setup {
+                        self.settings_open = false;
+                    }
+                }
+                Task::none()
+            }
             Message::ThumbsUp | Message::ThumbsDown => {
                 let rating = if matches!(message, Message::ThumbsUp) { 1 } else { -1 };
                 let trigger = "session"; // generic — could differentiate per CoachingTrigger later
@@ -844,13 +886,151 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        // First-run download still hijacks the whole window — UI-4 will
+        // fold it into a Wizard route. For now, pre-empt the layout.
         if self.download_modal_open {
             return self.view_download_modal();
         }
-        if self.settings_open {
-            return self.view_settings();
+
+        let status = self.status_pill();
+        let sidebar = ui::sidebar::view(self.route, status, Message::SwitchRoute);
+
+        let canvas: Element<'_, Message> = match self.route {
+            Route::Focus => self.view_main(),
+            Route::Stats => self.view_stats_placeholder(),
+            Route::Coach => self.view_coach_placeholder(),
+            Route::Setup => self.view_settings(),
+        };
+
+        iced::widget::row![sidebar, canvas].into()
+    }
+
+    fn status_pill(&self) -> StatusPill {
+        // Distraction wins if we just flagged one and toast still showing.
+        if let Some(ref c) = self.last_classification {
+            if c.label == ClassificationLabel::Distraction
+                && self.toast.is_some()
+            {
+                return StatusPill::Distraction;
+            }
         }
-        self.view_main()
+        match self.pomodoro_engine.state() {
+            SolarFocusCore::AppState::Idle => StatusPill::Idle,
+            SolarFocusCore::AppState::Focusing(_) => StatusPill::Focusing,
+            SolarFocusCore::AppState::Break => StatusPill::Break,
+            SolarFocusCore::AppState::Completed => StatusPill::Idle,
+        }
+    }
+
+    fn view_stats_placeholder(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        let (up, down) = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.feedback_counts().ok())
+            .unwrap_or((0, 0));
+
+        let recap_card: Element<'_, Message> = if let Some((d, t)) = &self.recap {
+            container(
+                column![
+                    text(format!("Resumen de {}", d))
+                        .size(FONT_SMALL)
+                        .color(TEXT_SECONDARY),
+                    text(t.clone()).size(FONT_BODY).color(TEXT_PRIMARY),
+                ]
+                .spacing(SPACE_XS as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
+        let body = column![
+            text("Estadísticas").size(FONT_TITLE).color(TEXT_PRIMARY),
+            recap_card,
+            text(format!("Sesiones hoy: {}", self.sessions_today))
+                .size(FONT_LEAD)
+                .color(TEXT_PRIMARY),
+            text(format!("Coaching feedback: 👍 {} · 👎 {}", up, down))
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+            text("(Más stats llegan en v1.2.0-rc2 UI-3)")
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+        ]
+        .spacing(SPACE_MD as u16)
+        .padding(SPACE_XL as u16)
+        .max_width(720);
+
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn view_coach_placeholder(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        let last = self
+            .last_coaching
+            .clone()
+            .unwrap_or_else(|| "(Aún no hay mensajes del coach)".to_string());
+        let model_badge = if cfg!(feature = "llm") && self.coach.is_ready() {
+            format!("Coach: LLM · modelo {:?}", self.settings.model_choice)
+        } else {
+            "Coach: Mock (sin LLM cargado)".to_string()
+        };
+
+        let body = column![
+            text("Coach").size(FONT_TITLE).color(TEXT_PRIMARY),
+            text(model_badge).size(FONT_SMALL).color(TEXT_SECONDARY),
+            container(text(last).size(FONT_BODY).color(TEXT_PRIMARY))
+                .padding(SPACE_MD as u16)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            iced::widget::row![
+                button(text("👍").size(FONT_SMALL))
+                    .on_press(Message::ThumbsUp)
+                    .padding([4, 10]),
+                iced::widget::Space::with_width(8),
+                button(text("👎").size(FONT_SMALL))
+                    .on_press(Message::ThumbsDown)
+                    .padding([4, 10]),
+            ],
+            text("(Historial completo llega en v1.2.0-rc2 UI-3)")
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+        ]
+        .spacing(SPACE_MD as u16)
+        .padding(SPACE_XL as u16)
+        .max_width(720);
+
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
+                ..Default::default()
+            })
+            .into()
     }
 
     fn view_download_modal(&self) -> Element<'_, Message> {

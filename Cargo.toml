@@ -9,7 +9,7 @@ members = [
 
 # 🧩 Dependencias compartidas del workspace (no externas en core-domain)
 [workspace.dependencies]
-iced = { version = "0.13", features = ["tokio"] }
+iced = { version = "0.13", features = ["tokio", "canvas"] }
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["std", "clock"] }
 serde_json = "1"
