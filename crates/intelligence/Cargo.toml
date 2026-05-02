@@ -1,0 +1,13 @@
+[package]
+name = "solar-focus-intelligence"
+version = "0.1.0"
+edition = "2021"
+authors = ["SolarFocus Team"]
+
+# Cero dependencias de runtime de IA — solo traits + tipos puros.
+# Las implementaciones reales (llama-cpp-2, ort) viven en apps/desktop/src/infra.
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+solar-focus-core = { path = "../core-domain" }
+thiserror = "1"

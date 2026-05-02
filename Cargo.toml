@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "apps/desktop",
     "crates/core-domain",
+    "crates/intelligence",
 ]
 
 # 🧩 Dependencias compartidas del workspace (no externas en core-domain)
@@ -11,6 +12,7 @@ members = [
 iced = { version = "0.13", features = ["tokio"] }
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["std", "clock"] }
+serde_json = "1"
 
 # 🗄️ Dependencias de infraestructura (solo apps/desktop)
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -18,3 +20,7 @@ env_logger = "0.11"
 directories = "5"
 rand = "0.8"
 log = "0.4"
+
+# 🧠 v1.2 — capa de inteligencia
+active-win-pos-rs = "0.8"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }

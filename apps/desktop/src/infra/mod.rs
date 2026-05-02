@@ -11,6 +11,12 @@ pub mod encryption;
 // 🗄️ Persistencia SQLite básica
 pub mod persistence;
 
+// 🪟 v1.2: vigilancia de la ventana activa
+pub mod window_watch;
+
+// ⚙️ v1.2: settings JSON persistidos
+pub mod settings;
+
 use chrono::Utc;
 
 /// Inicializa el logger global con stdout + archivo

@@ -1,6 +1,7 @@
 # Rust build cache — must never be committed
 /target
 **/target
+"target 2"
 
 # macOS
 .DS_Store
