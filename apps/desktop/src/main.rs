@@ -82,6 +82,12 @@ pub enum Message {
     ProbePermission,
     PermissionProbed(PermissionStatus),
 
+    // WIRE-3 — privacy tab actions
+    OpenSystemSettings,
+    RequestClearData,
+    ConfirmClearData,
+    CancelClearData,
+
     // Phase 3.5b — model download flow
     StartModelDownload,
     SkipModelDownload,
@@ -127,6 +133,9 @@ pub struct App {
 
     // WIRE-2 — cached macOS Screen Recording permission probe
     permission_status: PermissionStatus,
+
+    // WIRE-3 — destructive confirm gate for "Borrar todos los datos"
+    confirming_clear: bool,
 
     // Phase 3.5b — download lifecycle.
     // download_progress is only *read* on llm builds; mark allow on default
@@ -267,6 +276,7 @@ impl App {
                 toast: None,
                 distractions_today: 0,
                 permission_status: PermissionStatus::Unknown,
+                confirming_clear: false,
                 download_modal_open,
                 download_active: Arc::new(AtomicBool::new(false)),
                 download_progress: Arc::new(StdMutex::new(None)),
@@ -920,6 +930,50 @@ impl App {
                     log::info!("Permission → {:?}", status);
                     self.permission_status = status;
                 }
+                Task::none()
+            }
+            Message::OpenSystemSettings => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                        .spawn();
+                    log::info!("Opened macOS Privacy → Screen Recording");
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    log::info!("Open System Settings is macOS-only");
+                }
+                Task::none()
+            }
+            Message::RequestClearData => {
+                self.confirming_clear = true;
+                Task::none()
+            }
+            Message::CancelClearData => {
+                self.confirming_clear = false;
+                Task::none()
+            }
+            Message::ConfirmClearData => {
+                self.confirming_clear = false;
+                let removed = wipe_all_local_data();
+                log::warn!("Cleared local data: {} files/dirs removed", removed);
+                self.toast = Some(Toast {
+                    text: match self.settings.language {
+                        Language::Es => format!("Datos borrados ({} entradas).", removed),
+                        Language::En => format!("Data cleared ({} entries).", removed),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(5),
+                });
+                // Re-init persistence + settings to defaults so the running app
+                // doesn't crash on stale handles.
+                self.session_repo = SessionRepository::new().ok();
+                self.settings = Settings::default();
+                self.settings.save();
+                self.recap = None;
+                self.last_coaching = None;
+                self.distractions_today = 0;
+                self.sessions_today = 0;
                 Task::none()
             }
             Message::ThumbsUp | Message::ThumbsDown => {
@@ -2118,8 +2172,8 @@ impl App {
         let banner = container(
             column![
                 text(match self.settings.language {
-                    Language::Es => "🔒 Privacidad",
-                    Language::En => "🔒 Privacy",
+                    Language::Es => "Privacidad",
+                    Language::En => "Privacy",
                 })
                 .size(FONT_LEAD)
                 .color(TEXT_PRIMARY),
@@ -2144,6 +2198,13 @@ impl App {
             ..Default::default()
         });
 
+        // WIRE-3: live permission status with action button.
+        let (badge_color, status_text_es, status_text_en) = match self.permission_status {
+            PermissionStatus::Granted => (ACCENT, "Concedido", "Granted"),
+            PermissionStatus::NameOnly => (WARNING, "Parcial (solo procesos)", "Partial (process names only)"),
+            PermissionStatus::Denied => (DANGER, "Denegado", "Denied"),
+            PermissionStatus::Unknown => (TEXT_MUTED, "Verificando…", "Checking…"),
+        };
         let perm = container(
             column![
                 text(match self.settings.language {
@@ -2152,16 +2213,45 @@ impl App {
                 })
                 .size(FONT_SMALL)
                 .color(TEXT_MUTED),
-                text(match self.settings.language {
-                    Language::Es =>
-                        "Sin él, SolarFocus solo ve el nombre del proceso, no el título.",
-                    Language::En =>
-                        "Without it, SolarFocus only sees the process name, not the title.",
-                })
-                .size(FONT_SMALL)
-                .color(TEXT_PRIMARY),
+                iced::widget::row![
+                    text("●").size(FONT_LEAD).color(badge_color),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    text(if self.settings.language == Language::Es {
+                        status_text_es
+                    } else {
+                        status_text_en
+                    })
+                    .size(FONT_BODY)
+                    .color(TEXT_PRIMARY),
+                    iced::widget::horizontal_space(),
+                    iced::widget::button(
+                        text(match self.settings.language {
+                            Language::Es => "Abrir Ajustes del sistema",
+                            Language::En => "Open System Settings",
+                        })
+                        .size(FONT_SMALL),
+                    )
+                    .on_press(Message::OpenSystemSettings)
+                    .padding([6, 14])
+                    .style(|_, _| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(SURFACE_RAISED)),
+                        text_color: TEXT_PRIMARY,
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    iced::widget::button(text(match self.settings.language {
+                        Language::Es => "Re-verificar",
+                        Language::En => "Re-check",
+                    }).size(FONT_SMALL))
+                    .on_press(Message::ProbePermission)
+                    .padding([6, 14]),
+                ],
             ]
-            .spacing(SPACE_XS as u16),
+            .spacing(SPACE_SM as u16),
         )
         .padding(SPACE_MD as u16)
         .style(|_| container::Style {
@@ -2173,7 +2263,109 @@ impl App {
             ..Default::default()
         });
 
-        column![banner, perm].spacing(SPACE_MD as u16).into()
+        // WIRE-3: destructive "Borrar todos los datos" with two-step confirm.
+        let danger_zone: Element<'_, Message> = if self.confirming_clear {
+            container(
+                column![
+                    text(match self.settings.language {
+                        Language::Es => "¿Seguro? Esto borrará la base de datos, los ajustes y los modelos descargados.",
+                        Language::En => "Are you sure? This will erase the database, settings, and any downloaded models.",
+                    })
+                    .size(FONT_SMALL)
+                    .color(DANGER),
+                    iced::widget::row![
+                        iced::widget::button(text(match self.settings.language {
+                            Language::Es => "Sí, borrar todo",
+                            Language::En => "Yes, clear all",
+                        }))
+                        .on_press(Message::ConfirmClearData)
+                        .padding([6, 14])
+                        .style(|_, _| iced::widget::button::Style {
+                            background: Some(iced::Background::Color(DANGER)),
+                            text_color: BG,
+                            border: iced::Border {
+                                radius: 6.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                        iced::widget::Space::with_width(SPACE_SM as f32),
+                        iced::widget::button(text(match self.settings.language {
+                            Language::Es => "Cancelar",
+                            Language::En => "Cancel",
+                        }))
+                        .on_press(Message::CancelClearData)
+                        .padding([6, 14]),
+                    ],
+                ]
+                .spacing(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                border: iced::Border {
+                    color: DANGER,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            container(
+                iced::widget::row![
+                    column![
+                        text(match self.settings.language {
+                            Language::Es => "Zona peligrosa",
+                            Language::En => "Danger zone",
+                        })
+                        .size(FONT_SMALL)
+                        .color(DANGER),
+                        text(match self.settings.language {
+                            Language::Es =>
+                                "Elimina todos los datos locales (DB, ajustes, modelos).",
+                            Language::En =>
+                                "Erase all local data (DB, settings, models).",
+                        })
+                        .size(FONT_SMALL)
+                        .color(TEXT_SECONDARY),
+                    ]
+                    .spacing(2),
+                    iced::widget::horizontal_space(),
+                    iced::widget::button(text(match self.settings.language {
+                        Language::Es => "Borrar todos los datos",
+                        Language::En => "Clear all data",
+                    }))
+                    .on_press(Message::RequestClearData)
+                    .padding([6, 14])
+                    .style(|_, _| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(SURFACE_RAISED)),
+                        text_color: DANGER,
+                        border: iced::Border {
+                            color: DANGER,
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+                ]
+                .padding(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        column![banner, perm, danger_zone]
+            .spacing(SPACE_MD as u16)
+            .into()
     }
 
     fn view_setup_about(&self) -> Element<'_, Message> {
@@ -2767,6 +2959,31 @@ fn on_off(b: bool) -> &'static str {
     } else {
         "OFF"
     }
+}
+
+/// Remove the SQLite DB, settings.json, and any model files. Returns
+/// the count of paths actually deleted (best-effort; missing paths skipped).
+fn wipe_all_local_data() -> u32 {
+    let mut n = 0u32;
+    let mut try_remove = |p: std::path::PathBuf| {
+        if p.is_file() {
+            if std::fs::remove_file(&p).is_ok() {
+                n += 1;
+            }
+        } else if p.is_dir() {
+            if std::fs::remove_dir_all(&p).is_ok() {
+                n += 1;
+            }
+        }
+    };
+
+    if let Some(d) = directories::ProjectDirs::from("os", "SolarFocus", "SolarFocus") {
+        try_remove(d.config_dir().join("settings.json"));
+        try_remove(d.config_dir().join("rules.toml"));
+        try_remove(d.data_dir().join("solarfocus.db"));
+        try_remove(d.data_dir().join("models"));
+    }
+    n
 }
 
 /// Synchronous one-off probe of the foreground-window API. Cheap (~ms);
