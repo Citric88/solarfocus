@@ -8,8 +8,7 @@
 //! - NEW: Window watcher polled every N seconds during focus sessions.
 //! - NEW: User settings persisted to JSON.
 
-use iced::alignment::Horizontal;
-use iced::widget::{button, column, container, progress_bar, row, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Color, Element, Length, Subscription, Task, window};
 
 pub use solar_focus_core as SolarFocusCore;
@@ -1593,127 +1592,6 @@ impl App {
             .into()
     }
 
-    #[allow(dead_code)] // Replaced by model_download_panel embedded in wizard + Setup; kept for reference until v1.2.1.
-    fn view_download_modal(&self) -> Element<'_, Message> {
-        let snap = self.download_progress.lock().unwrap().clone();
-        let downloading = self.download_active.load(Ordering::Relaxed);
-
-        let (lang_title, lang_desc, lang_dl, lang_skip, lang_dl_progress, lang_verify, lang_close) =
-            match self.settings.language {
-                Language::Es => (
-                    "Descarga del modelo IA",
-                    "SolarFocus puede usar un modelo local pequeño (~1 GB) para ofrecer coaching contextual. Todo el procesamiento ocurre en tu equipo. ¿Lo descargo ahora?",
-                    "Descargar (~1 GB)",
-                    "Saltar — usar coaching básico",
-                    "Descargando…",
-                    "Verificando…",
-                    "Cerrar",
-                ),
-                Language::En => (
-                    "AI model download",
-                    "SolarFocus can use a small local model (~1 GB) for contextual coaching. All processing stays on your machine. Download now?",
-                    "Download (~1 GB)",
-                    "Skip — use basic coaching",
-                    "Downloading…",
-                    "Verifying…",
-                    "Close",
-                ),
-            };
-
-        let title = text(lang_title).size(28).color(Color::WHITE);
-        let desc = text(lang_desc)
-            .size(15)
-            .color(Color::from_rgb(0.85, 0.9, 0.85))
-            .width(Length::Fixed(560.0));
-
-        let body: Element<'_, Message> = if let Some(s) = snap {
-            // Active download
-            let pct = if s.total > 0 {
-                (s.downloaded as f64 / s.total as f64).min(1.0)
-            } else {
-                0.0
-            };
-            let mb_done = s.downloaded as f64 / 1_048_576.0;
-            let mb_total = s.total as f64 / 1_048_576.0;
-            let kbps = s.bytes_per_sec / 1024;
-            let label_state = if s.verifying {
-                lang_verify.to_string()
-            } else if downloading {
-                format!(
-                    "{} {:.1}/{:.1} MB · {} KB/s",
-                    lang_dl_progress, mb_done, mb_total, kbps
-                )
-            } else if let Some(ref e) = self.download_error {
-                format!("Error: {}", e)
-            } else {
-                format!("{:.1}/{:.1} MB", mb_done, mb_total)
-            };
-            column![
-                progress_bar(0.0..=1.0, pct as f32).width(Length::Fixed(560.0)),
-                text(label_state)
-                    .size(13)
-                    .color(Color::from_rgb(0.7, 0.85, 0.7)),
-            ]
-            .spacing(8)
-            .into()
-        } else {
-            // Initial state — offer Download / Skip
-            row![
-                button(text(lang_dl).size(15))
-                    .on_press(Message::StartModelDownload)
-                    .padding([10, 22])
-                    .style(|_, _| button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.6, 0.3))),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-                iced::widget::Space::with_width(12),
-                button(text(lang_skip).size(15))
-                    .on_press(Message::SkipModelDownload)
-                    .padding([10, 22])
-                    .style(|_, _| button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.35, 0.32))),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            radius: 6.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            ]
-            .into()
-        };
-
-        let close: Element<'_, Message> = if !downloading {
-            button(text(lang_close).size(13))
-                .on_press(Message::DismissDownloadModal)
-                .padding([6, 14])
-                .into()
-        } else {
-            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
-        };
-
-        let content = column![title, desc, body, close]
-            .spacing(18)
-            .align_x(Horizontal::Center)
-            .max_width(640);
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .padding(40)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.04, 0.06, 0.05))),
-                ..Default::default()
-            })
-            .into()
-    }
 
     /// UI-2: Focus canvas — hero timer, ring progress, single context-aware
     /// CTA, microcopy slot. No top bar (sidebar handles nav). No recap card
