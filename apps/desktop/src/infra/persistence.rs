@@ -189,6 +189,74 @@ impl SessionRepository {
         Ok(records)
     }
 
+    /// Returns 7 entries (oldest first), one per day in the last 7 days
+    /// including today. Each entry: (ISO date, total focus seconds).
+    /// Days with no data come back as 0.
+    pub fn weekly_focus_seconds(&self) -> SqlResult<Vec<(String, u32)>> {
+        use chrono::{Datelike, Local, Duration as CDur};
+        let today = Local::now().date_naive();
+        let mut days: Vec<(String, u32)> = (0..7)
+            .rev()
+            .map(|n| {
+                let d = today - CDur::days(n);
+                (d.format("%Y-%m-%d").to_string(), 0)
+            })
+            .collect();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT date(start_time), SUM(duration) FROM sessions
+             WHERE state = 'completed' AND date(start_time) >= date('now', '-6 days')
+             GROUP BY date(start_time)",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let day: String = r.get(0)?;
+            let secs: f64 = r.get(1)?;
+            if let Some(slot) = days.iter_mut().find(|(d, _)| d == &day) {
+                slot.1 = secs as u32;
+            }
+        }
+        // Suppress unused-import lint
+        let _ = today.weekday();
+        Ok(days)
+    }
+
+    /// All-time totals: (sessions completed, total focus seconds).
+    pub fn lifetime_totals(&self) -> SqlResult<(u32, u32)> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE state = 'completed'",
+            [],
+            |r| r.get(0),
+        )?;
+        let secs: f64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(duration), 0) FROM sessions WHERE state = 'completed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0.0);
+        Ok((count, secs as u32))
+    }
+
+    /// Last N coaching feedback entries, newest first.
+    pub fn recent_feedback(&self, limit: u32) -> SqlResult<Vec<(String, i32, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT created_at, rating, message FROM coaching_feedback
+             ORDER BY id DESC LIMIT ?",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![limit])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push((
+                r.get::<_, String>(0)?,
+                r.get::<_, i32>(1)?,
+                r.get::<_, String>(2)?,
+            ));
+        }
+        Ok(out)
+    }
+
     /// Resumen más reciente (para mostrar al iniciar la app).
     pub fn latest_summary(&self) -> SqlResult<Option<(String, String)>> {
         self.conn

@@ -33,7 +33,7 @@ mod ui;
 
 use ui::sidebar::{Route, StatusPill};
 
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use infra::persistence::SessionRepository;
 use infra::settings::{ClassifierMode, Settings};
 use infra::window_watch::WindowWatcher;
@@ -922,25 +922,140 @@ impl App {
         }
     }
 
+    /// UI-3: Stats canvas — three cards (Today / Week / All-time) +
+    /// weekly bar chart + recap card.
     fn view_stats_placeholder(&self) -> Element<'_, Message> {
         use ui::palette::*;
+
         let (up, down) = self
             .session_repo
             .as_ref()
             .and_then(|r| r.feedback_counts().ok())
             .unwrap_or((0, 0));
+        let week = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.weekly_focus_seconds().ok())
+            .unwrap_or_default();
+        let (lifetime_n, lifetime_secs) = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.lifetime_totals().ok())
+            .unwrap_or((0, 0));
+
+        let today_secs: u32 = week.last().map(|(_, s)| *s).unwrap_or(0);
+        let week_secs: u32 = week.iter().map(|(_, s)| *s).sum();
+
+        let card = |title: &str, primary: String, secondary: &str| -> Element<'_, Message> {
+            container(
+                column![
+                    text(title.to_string()).size(FONT_SMALL).color(TEXT_MUTED),
+                    text(primary).size(FONT_TITLE).color(TEXT_PRIMARY),
+                    text(secondary.to_string())
+                        .size(FONT_SMALL)
+                        .color(TEXT_SECONDARY),
+                ]
+                .spacing(SPACE_XS as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .width(Length::Fixed(200.0))
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        let cards = iced::widget::row![
+            card(
+                match self.settings.language {
+                    Language::Es => "HOY",
+                    Language::En => "TODAY",
+                },
+                format!("{}", self.sessions_today),
+                &format!("{} min de foco", today_secs / 60),
+            ),
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            card(
+                match self.settings.language {
+                    Language::Es => "ESTA SEMANA",
+                    Language::En => "THIS WEEK",
+                },
+                format!("{} min", week_secs / 60),
+                &format!("{} sesiones de coaching", up + down),
+            ),
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            card(
+                match self.settings.language {
+                    Language::Es => "TOTAL",
+                    Language::En => "ALL-TIME",
+                },
+                format!("{}", lifetime_n),
+                &format!("{} h totales", lifetime_secs / 3600),
+            ),
+        ];
+
+        // Weekly chart — convert ISO dates to single-letter weekday labels.
+        let chart_bars: Vec<(String, u32)> = week
+            .iter()
+            .map(|(d, s)| {
+                let parsed = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+                let label = parsed
+                    .map(|d| weekday_short(d.weekday()))
+                    .unwrap_or("?".to_string());
+                (label, s / 60)
+            })
+            .collect();
+
+        let chart: Element<'_, Message> = iced::widget::Canvas::new(ui::chart::WeeklyChart::new(chart_bars))
+            .width(Length::Fixed(560.0))
+            .height(Length::Fixed(160.0))
+            .into();
+        let chart_card = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Minutos de foco por día",
+                    Language::En => "Focus minutes per day",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                chart,
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
         let recap_card: Element<'_, Message> = if let Some((d, t)) = &self.recap {
             container(
                 column![
-                    text(format!("Resumen de {}", d))
-                        .size(FONT_SMALL)
-                        .color(TEXT_SECONDARY),
+                    text(format!(
+                        "{} {}",
+                        match self.settings.language {
+                            Language::Es => "Resumen de",
+                            Language::En => "Recap of",
+                        },
+                        d
+                    ))
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
                     text(t.clone()).size(FONT_BODY).color(TEXT_PRIMARY),
                 ]
                 .spacing(SPACE_XS as u16),
             )
             .padding(SPACE_MD as u16)
+            .width(Length::Fixed(560.0))
             .style(|_| container::Style {
                 background: Some(iced::Background::Color(SURFACE_RAISED)),
                 border: iced::Border {
@@ -955,23 +1070,21 @@ impl App {
         };
 
         let body = column![
-            text("Estadísticas").size(FONT_TITLE).color(TEXT_PRIMARY),
+            text(match self.settings.language {
+                Language::Es => "Estadísticas",
+                Language::En => "Stats",
+            })
+            .size(FONT_TITLE)
+            .color(TEXT_PRIMARY),
+            cards,
+            chart_card,
             recap_card,
-            text(format!("Sesiones hoy: {}", self.sessions_today))
-                .size(FONT_LEAD)
-                .color(TEXT_PRIMARY),
-            text(format!("Coaching feedback: 👍 {} · 👎 {}", up, down))
-                .size(FONT_SMALL)
-                .color(TEXT_SECONDARY),
-            text("(Más stats llegan en v1.2.0-rc2 UI-3)")
-                .size(FONT_SMALL)
-                .color(TEXT_MUTED),
         ]
-        .spacing(SPACE_MD as u16)
+        .spacing(SPACE_LG as u16)
         .padding(SPACE_XL as u16)
-        .max_width(720);
+        .max_width(680);
 
-        container(body)
+        container(iced::widget::scrollable(body))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -981,49 +1094,130 @@ impl App {
             .into()
     }
 
+    /// UI-3: Coach canvas — model badge + most recent coaching message
+    /// (large) with ghost thumbs + scrolling history of past feedback.
     fn view_coach_placeholder(&self) -> Element<'_, Message> {
         use ui::palette::*;
+
         let last = self
             .last_coaching
             .clone()
-            .unwrap_or_else(|| "(Aún no hay mensajes del coach)".to_string());
+            .unwrap_or_else(|| match self.settings.language {
+                Language::Es => "(Aún no hay mensajes del coach)".to_string(),
+                Language::En => "(No coach messages yet)".to_string(),
+            });
         let model_badge = if cfg!(feature = "llm") && self.coach.is_ready() {
-            format!("Coach: LLM · modelo {:?}", self.settings.model_choice)
+            format!(
+                "{} · {:?}",
+                match self.settings.language {
+                    Language::Es => "Modelo activo",
+                    Language::En => "Active model",
+                },
+                self.settings.model_choice
+            )
         } else {
-            "Coach: Mock (sin LLM cargado)".to_string()
+            match self.settings.language {
+                Language::Es => "Coach básico (sin LLM cargado)".to_string(),
+                Language::En => "Basic coach (no LLM loaded)".to_string(),
+            }
         };
 
-        let body = column![
-            text("Coach").size(FONT_TITLE).color(TEXT_PRIMARY),
-            text(model_badge).size(FONT_SMALL).color(TEXT_SECONDARY),
-            container(text(last).size(FONT_BODY).color(TEXT_PRIMARY))
-                .padding(SPACE_MD as u16)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(SURFACE)),
-                    border: iced::Border {
-                        radius: 8.0.into(),
+        let live = container(
+            column![
+                text(model_badge).size(FONT_SMALL).color(TEXT_MUTED),
+                text(last.clone()).size(FONT_LEAD).color(TEXT_PRIMARY),
+                iced::widget::row![
+                    iced::widget::horizontal_space(),
+                    ghost_button("👍", Message::ThumbsUp),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    ghost_button("👎", Message::ThumbsDown),
+                ],
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_LG as u16)
+        .width(Length::Fixed(640.0))
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 10.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let recent = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.recent_feedback(20).ok())
+            .unwrap_or_default();
+
+        let history_title = text(match self.settings.language {
+            Language::Es => "Historial de feedback",
+            Language::En => "Feedback history",
+        })
+        .size(FONT_BODY)
+        .color(TEXT_SECONDARY);
+
+        let history_items: Vec<Element<'_, Message>> = if recent.is_empty() {
+            vec![text(match self.settings.language {
+                Language::Es => "(Aún no has dejado feedback.)",
+                Language::En => "(No feedback yet.)",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED)
+            .into()]
+        } else {
+            recent
+                .into_iter()
+                .map(|(when, rating, msg)| {
+                    let glyph = if rating > 0 { "+" } else { "−" };
+                    let glyph_color = if rating > 0 { ACCENT } else { DANGER };
+                    container(
+                        iced::widget::row![
+                            text(glyph.to_string()).size(FONT_LEAD).color(glyph_color),
+                            iced::widget::Space::with_width(SPACE_SM as f32),
+                            column![
+                                text(msg).size(FONT_SMALL).color(TEXT_PRIMARY),
+                                text(when).size(FONT_TINY).color(TEXT_MUTED),
+                            ]
+                            .spacing(2),
+                        ]
+                        .padding(SPACE_SM as u16),
+                    )
+                    .padding(SPACE_XS as u16)
+                    .width(Length::Fixed(640.0))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(SURFACE)),
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            iced::widget::row![
-                button(text("👍").size(FONT_SMALL))
-                    .on_press(Message::ThumbsUp)
-                    .padding([4, 10]),
-                iced::widget::Space::with_width(8),
-                button(text("👎").size(FONT_SMALL))
-                    .on_press(Message::ThumbsDown)
-                    .padding([4, 10]),
-            ],
-            text("(Historial completo llega en v1.2.0-rc2 UI-3)")
-                .size(FONT_SMALL)
-                .color(TEXT_MUTED),
+                    })
+                    .into()
+                })
+                .collect()
+        };
+
+        let history_col = column(history_items).spacing(SPACE_XS as u16);
+
+        let body = column![
+            text(match self.settings.language {
+                Language::Es => "Coach",
+                Language::En => "Coach",
+            })
+            .size(FONT_TITLE)
+            .color(TEXT_PRIMARY),
+            live,
+            history_title,
+            history_col,
         ]
-        .spacing(SPACE_MD as u16)
+        .spacing(SPACE_LG as u16)
         .padding(SPACE_XL as u16)
         .max_width(720);
 
-        container(body)
+        container(iced::widget::scrollable(body))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -1529,6 +1723,47 @@ fn on_off(b: bool) -> &'static str {
     } else {
         "OFF"
     }
+}
+
+fn weekday_short(d: chrono::Weekday) -> String {
+    use chrono::Weekday;
+    match d {
+        Weekday::Mon => "L".to_string(),
+        Weekday::Tue => "M".to_string(),
+        Weekday::Wed => "X".to_string(),
+        Weekday::Thu => "J".to_string(),
+        Weekday::Fri => "V".to_string(),
+        Weekday::Sat => "S".to_string(),
+        Weekday::Sun => "D".to_string(),
+    }
+}
+
+fn ghost_button(label: &str, msg: Message) -> Element<'_, Message> {
+    use ui::palette::*;
+    iced::widget::button(text(label.to_string()).size(FONT_SMALL).color(TEXT_SECONDARY))
+        .on_press(msg)
+        .padding([4, 10])
+        .style(|_, status| match status {
+            iced::widget::button::Status::Hovered => iced::widget::button::Style {
+                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                text_color: TEXT_PRIMARY,
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            _ => iced::widget::button::Style {
+                background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+                text_color: TEXT_SECONDARY,
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        })
+        .into()
 }
 
 /// Select the active Coach based on settings + compile-time `llm` feature
