@@ -1,173 +1,121 @@
 //! # SolarFocus OS - App Principal (Orquestador Thin Controller)
-//! 
-//! Arquitectura Hexagonal: La UI solo orquesta eventos del Core Domain.
-//! 
-//! ## 🏗️ Estructura:
-//! - `SolarFocusCore` - Importa lógica pura de core-domain
-//! - `AppState` - Maneja estado de la ventana y mensajes
-//! - `App` - Controlador thin que delega a SolarFocusCore
-//! - `SessionRepository` - Persistencia SQLite para logs de sesiones
+//!
+//! Arquitectura Hexagonal: la UI orquesta eventos del Core Domain.
 
-use iced::{
-    Element, Length, Task, window, Color, Subscription,
-};
-use iced::widget::{button, column, text, container, progress_bar};
-use iced::alignment::{Horizontal, Vertical};
+use iced::{Color, Element, Length, Subscription, Task, window};
+use iced::alignment::Horizontal;
+use iced::widget::{button, column, container, progress_bar, text};
 
-// 📦 Importar tipos del Core Domain (Lógica pura)
 pub use solar_focus_core as SolarFocusCore;
 
 mod infra;
-use infra::persistence::SessionRepository;
-use chrono::{DateTime, Utc};
 
-/// Mensajes de la aplicación (UI events)
+use chrono::Utc;
+use infra::persistence::SessionRepository;
+
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Botón START FOCUS
     StartFocus,
-    
-    /// Botón PAUSE
     Pause,
-    
-    /// Botón RESUME
     Resume,
-    
-    /// Botón TAKE BREAK manual
     TakeBreak,
-    
-    /// Tick de tiempo del motor (delta desde último frame)
     TimerTick(f32),
-    
-    /// Sesión completada - evento del core
     SessionCompleted,
 }
 
-/// Controlador principal de la aplicación
 pub struct App {
-    /// Estado de la ventana (UI state)
-    window_state: AppState,
-    
-    /// Motor Pomodoro del Core Domain (lógica pura)
     pomodoro_engine: SolarFocusCore::PomodoroEngine,
-    
-    /// Repositorio de persistencia SQLite
     session_repo: Option<SessionRepository>,
+    last_state_was_completed: bool,
 }
 
 impl App {
-    /// Crea una nueva instancia de la aplicación
     pub fn new() -> (Self, Task<Message>) {
         let engine = SolarFocusCore::PomodoroEngine::new();
-        
-        // Inicializar SQLite para persistencia de sesiones
-        let session_repo = SessionRepository::new().ok();
-        
+        let session_repo = match SessionRepository::new() {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::warn!("SQLite no disponible: {}", e);
+                None
+            }
+        };
         (
             Self {
-                window_state: AppState::Idle,
                 pomodoro_engine: engine,
                 session_repo,
+                last_state_was_completed: false,
             },
             Task::none(),
         )
     }
-    
-    /// Título de la ventana
+
     pub fn title(&self) -> String {
         match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Idle => "🌱 SolarFocus OS - Esperando...".to_string(),
-            SolarFocusCore::AppState::Focusing(_) => "🔥 SolarFocus OS - En Foco".to_string(),
-            SolarFocusCore::AppState::Break => "☀️ SolarFocus OS - Descanso".to_string(),
-            SolarFocusCore::AppState::Completed => "✨ SolarFocus OS - ¡Completado!".to_string(),
+            SolarFocusCore::AppState::Idle => "SolarFocus OS - Esperando...".to_string(),
+            SolarFocusCore::AppState::Focusing(_) => "SolarFocus OS - En Foco".to_string(),
+            SolarFocusCore::AppState::Break => "SolarFocus OS - Descanso".to_string(),
+            SolarFocusCore::AppState::Completed => "SolarFocus OS - Completado".to_string(),
         }
     }
-    
-    /// Suscripción para ticks de tiempo precisos (independiente del loop de UI)
+
     fn subscription(&self) -> Subscription<Message> {
-        if matches!(self.pomodoro_engine.state(), 
-                   SolarFocusCore::AppState::Focusing(_) | 
-                   SolarFocusCore::AppState::Break) {
-            // Usar tiempo preciso: tick cada 33ms (~30 FPS para actualizaciones suaves)
-            return iced::time::every(std::time::Duration::from_millis(33)).map(|_| Message::TimerTick(0.033));
+        if self.pomodoro_engine.is_paused() {
+            return Subscription::none();
         }
-        
+        if matches!(
+            self.pomodoro_engine.state(),
+            SolarFocusCore::AppState::Focusing(_) | SolarFocusCore::AppState::Break
+        ) {
+            return iced::time::every(std::time::Duration::from_millis(100))
+                .map(|_| Message::TimerTick(0.1));
+        }
         Subscription::none()
     }
-    
-    /// Handle ticks de tiempo del motor Pomodoro
-    fn handle_timer_tick(&mut self, delta: f32) -> Task<Message> {
-        // El motor ya fue ticked en subscription, solo update UI state si necesario
-        if matches!(self.pomodoro_engine.state(), 
-                   SolarFocusCore::AppState::Focusing(_) | 
-                   SolarFocusCore::AppState::Break) {
-            self.window_state.tick(delta);
-        }
-        Task::none()
-    }
-    
-    /// Actualización de estado (handle eventos)
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::StartFocus => {
-                println!("🔥 Iniciando sesión de enfoque...");
+                log::info!("Iniciando sesión de enfoque");
                 self.pomodoro_engine.start_focus();
-                self.window_state = AppState::Focusing(self.pomodoro_engine.config().focus_duration);
+                self.last_state_was_completed = false;
                 Task::none()
-            },
-            
+            }
             Message::Pause => {
-                if let SolarFocusCore::AppState::Focusing(_) = self.pomodoro_engine.state() {
-                    // Pausa de 30 segundos (pausa manual)
-                    self.pomodoro_engine.pause(30.0);
-                    
-                    if matches!(self.pomodoro_engine.state(), 
-                                SolarFocusCore::AppState::Idle) {
-                        println!("⏸️ Sesión pausada temporalmente");
-                        self.window_state = AppState::Paused;
-                    }
-                }
+                self.pomodoro_engine.pause(0.0);
+                log::info!("Sesión pausada");
                 Task::none()
-            },
-            
+            }
             Message::Resume => {
-                if let SolarFocusCore::AppState::Focusing(_) = self.pomodoro_engine.state() {
-                    self.pomodoro_engine.resume();
-                    println!("▶️ Sesión reanudada");
-                    self.window_state = AppState::Resuming;
-                    
-                    // Si resume y ya estaba en Break, transicionar de vuelta
-                    if matches!(self.pomodoro_engine.state(), 
-                                SolarFocusCore::AppState::Break) {
-                        self.pomodoro_engine.transition_to_focus();
-                    }
-                }
+                self.pomodoro_engine.resume();
+                log::info!("Sesión reanudada");
                 Task::none()
-            },
-            
+            }
             Message::TakeBreak => {
-                // Forzar break manual (siempre 15 min por defecto)
-                let _config = self.pomodoro_engine.config().clone();
                 self.pomodoro_engine.transition_to_break();
-                println!("☀️ Tomando descanso manual");
-                self.window_state = AppState::Break;
+                log::info!("Tomando descanso manual");
                 Task::none()
-            },
-            
+            }
             Message::TimerTick(delta) => {
-                // El motor ya fue ticked en subscription, solo update UI state si necesario
-                if matches!(self.pomodoro_engine.state(), 
-                           SolarFocusCore::AppState::Focusing(_) | 
-                           SolarFocusCore::AppState::Break) {
-                    self.window_state.tick(delta);
+                let was_focusing = matches!(
+                    self.pomodoro_engine.state(),
+                    SolarFocusCore::AppState::Focusing(_)
+                );
+
+                self.pomodoro_engine.tick(delta);
+
+                // (#5) Detectar transición Focus→Break y emitir SessionCompleted
+                let now_break = matches!(
+                    self.pomodoro_engine.state(),
+                    SolarFocusCore::AppState::Break
+                );
+                if was_focusing && now_break && !self.last_state_was_completed {
+                    self.last_state_was_completed = true;
+                    return Task::done(Message::SessionCompleted);
                 }
                 Task::none()
-            },
-            
+            }
             Message::SessionCompleted => {
-                println!("✨ Sesión finalizada - guardando en SQLite");
-                
-                // Guardar registro en SQLite
+                log::info!("Sesión completada — guardando en SQLite");
                 if let Some(ref repo) = self.session_repo {
                     let duration = self.pomodoro_engine.config().focus_duration;
                     let record = infra::persistence::SessionRecord {
@@ -176,168 +124,157 @@ impl App {
                         duration,
                         state: "completed".to_string(),
                     };
-                    
-                    if let Ok(_) = repo.save_session(&record) {
-                        println!("✅ Sesión guardada en base de datos local");
+                    match repo.save_session(&record) {
+                        Ok(id) => log::info!("Sesión #{} guardada", id),
+                        Err(e) => log::error!("Fallo guardando sesión: {}", e),
                     }
                 }
-                
-                self.window_state = AppState::Completed;
                 Task::none()
-            },
+            }
         }
     }
-    
-    /// Renderizado de la interfaz de usuario
-    pub fn view(&self) -> Element<Message> {
-        // 🎨 Aplicar tema Solarpunk con fondo oscuro y texto verde/azul según estado
-        let background_color = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Focusing(_) => Color::from_rgb(15.0 / 255.0, 30.0 / 255.0, 20.0 / 255.0), // Verde oscuro casi negro
-            SolarFocusCore::AppState::Break => Color::from_rgb(180.0 / 255.0, 220.0 / 255.0, 255.0 / 255.0),   // Azul claro para descanso
-            _ => Color::from_rgb(10.0 / 255.0, 15.0 / 255.0, 12.0 / 255.0), // Gris muy oscuro (default)
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let bg = match self.pomodoro_engine.state() {
+            SolarFocusCore::AppState::Focusing(_) => Color::from_rgb(0.06, 0.12, 0.08),
+            SolarFocusCore::AppState::Break => Color::from_rgb(0.70, 0.86, 1.00),
+            _ => Color::from_rgb(0.04, 0.06, 0.05),
         };
-        
+
         let title = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Idle => "🌱 SolarFocus OS",
-            SolarFocusCore::AppState::Focusing(_) => "🔥 En Foco",
-            SolarFocusCore::AppState::Break => "☀️ Descanso",
-            SolarFocusCore::AppState::Completed => "✨ ¡Sesión Completada!",
+            SolarFocusCore::AppState::Idle => "SolarFocus OS",
+            SolarFocusCore::AppState::Focusing(_) => "En Foco",
+            SolarFocusCore::AppState::Break => "Descanso",
+            SolarFocusCore::AppState::Completed => "Sesión Completada",
         };
-        
+
         let status_text = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Idle => "Estado: Esperando inicio...".to_string(),
+            SolarFocusCore::AppState::Idle => "Esperando inicio...".to_string(),
             SolarFocusCore::AppState::Focusing(_) => {
-                let remaining = self.pomodoro_engine.remaining_time_formatted();
-                format!("⏱️ FOCUS: {}", remaining)
-            },
-            SolarFocusCore::AppState::Break => "🌿 Descanso en curso".to_string(),
-            SolarFocusCore::AppState::Completed => "🎉 ¡Excelente trabajo!".to_string(),
+                let suffix = if self.pomodoro_engine.is_paused() { " (PAUSADO)" } else { "" };
+                format!("FOCUS: {}{}", self.pomodoro_engine.remaining_time_formatted(), suffix)
+            }
+            SolarFocusCore::AppState::Break => {
+                format!("BREAK: {}", self.pomodoro_engine.remaining_time_formatted())
+            }
+            SolarFocusCore::AppState::Completed => "Excelente trabajo!".to_string(),
         };
-        
-        // 📊 Barra de progreso visual (usando Iced progress_bar)
+
         let progress = self.pomodoro_engine.progress();
-        let progress_bar = progress_bar(
-            0.0..=1.0,
-            progress,
-        )
-        .width(Length::Fixed(200.0));
-        
-        let progress_text = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Focusing(_) => format!("Progreso: {:.0}%", (progress * 100.0)),
-            _ => "No en progreso".to_string(),
-        };
-        
-        // 🎛️ Botones de control
-        let btn_start: Element<_> = button("▶️ START FOCUS").on_press(Message::StartFocus).style(|_, _| button::Style {
-            background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.6, 0.3))),
-            text_color: Color::WHITE,
-            ..Default::default()
-        }).into();
+        let bar = progress_bar(0.0..=1.0, progress).width(Length::Fixed(280.0));
 
-        let btn_pause: Element<_> = if matches!(self.pomodoro_engine.state(), SolarFocusCore::AppState::Focusing(_)) {
-            button("⏸️ PAUSE").on_press(Message::Pause).style(|_, _| button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.4, 0.4, 0.4))),
-                text_color: Color::WHITE,
-                ..Default::default()
-            }).into()
-        } else {
-            container("N/A").style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1))),
-                text_color: Some(Color::from_rgb(0.5, 0.5, 0.5)),
-                ..Default::default()
-            }).into()
+        let progress_label = match self.pomodoro_engine.state() {
+            SolarFocusCore::AppState::Focusing(_) | SolarFocusCore::AppState::Break => {
+                format!("Progreso: {:.0}%", progress * 100.0)
+            }
+            _ => String::new(),
         };
 
-        let btn_break: Element<_> = if matches!(self.pomodoro_engine.state(), SolarFocusCore::AppState::Focusing(_) | SolarFocusCore::AppState::Break) {
-            button("☀️ TAKE BREAK").on_press(Message::TakeBreak).style(|_, _| button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.3, 0.5, 0.4))),
-                text_color: Color::WHITE,
-                ..Default::default()
-            }).into()
-        } else {
-            container("N/A").style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1))),
-                text_color: Some(Color::from_rgb(0.5, 0.5, 0.5)),
-                ..Default::default()
-            }).into()
-        };
+        // (#16) Render only the buttons that are valid for the current state
+        let mut buttons: Vec<Element<'_, Message>> = Vec::new();
 
-        let buttons = column![btn_start, btn_pause, btn_break]
-        .spacing(10)
-        .align_x(Horizontal::Center);
-        
-        // 📦 Contenido completo centrado
+        let in_focus = matches!(
+            self.pomodoro_engine.state(),
+            SolarFocusCore::AppState::Focusing(_)
+        );
+        let in_break = matches!(
+            self.pomodoro_engine.state(),
+            SolarFocusCore::AppState::Break
+        );
+        let is_paused = self.pomodoro_engine.is_paused();
+
+        if matches!(self.pomodoro_engine.state(), SolarFocusCore::AppState::Idle | SolarFocusCore::AppState::Completed) {
+            buttons.push(
+                button(text("START FOCUS").size(18))
+                    .on_press(Message::StartFocus)
+                    .padding([10, 24])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.6, 0.3))),
+                        text_color: Color::WHITE,
+                        border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                        ..Default::default()
+                    })
+                    .into(),
+            );
+        }
+
+        if (in_focus || in_break) && !is_paused {
+            buttons.push(
+                button(text("PAUSE").size(18))
+                    .on_press(Message::Pause)
+                    .padding([10, 24])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.45, 0.45, 0.45))),
+                        text_color: Color::WHITE,
+                        border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                        ..Default::default()
+                    })
+                    .into(),
+            );
+        }
+
+        if (in_focus || in_break) && is_paused {
+            buttons.push(
+                button(text("RESUME").size(18))
+                    .on_press(Message::Resume)
+                    .padding([10, 24])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.55, 0.40))),
+                        text_color: Color::WHITE,
+                        border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                        ..Default::default()
+                    })
+                    .into(),
+            );
+        }
+
+        if in_focus {
+            buttons.push(
+                button(text("TAKE BREAK").size(18))
+                    .on_press(Message::TakeBreak)
+                    .padding([10, 24])
+                    .style(|_, _| button::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.50, 0.40))),
+                        text_color: Color::WHITE,
+                        border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                        ..Default::default()
+                    })
+                    .into(),
+            );
+        }
+
+        let buttons_col = column(buttons).spacing(10).align_x(Horizontal::Center);
+
         let content = column![
-            text(title).size(40),
-            text(status_text).size(32),
-            
-            progress_bar,
-            text(progress_text).size(16).color(Color::from_rgb(0.7, 0.8, 0.7)),
-            
-            buttons,
-            
+            text(title).size(40).color(Color::from_rgb(0.92, 0.96, 0.92)),
+            text(status_text).size(28).color(Color::from_rgb(0.85, 0.92, 0.85)),
+            bar,
+            text(progress_label).size(16).color(Color::from_rgb(0.7, 0.8, 0.7)),
+            buttons_col,
             text("(Click START FOCUS para comenzar una sesión)")
                 .size(14)
                 .color(Color::from_rgb(0.6, 0.6, 0.6)),
         ]
         .spacing(20)
         .align_x(Horizontal::Center);
-        
+
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .style(move |_theme| {
-                container::Style {
-                    background: Some(iced::Background::Color(background_color)),
-                    ..Default::default()
-                }
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(bg)),
+                ..Default::default()
             })
             .into()
     }
 }
 
-/// Estado de la ventana (UI state simple)
-#[derive(Debug, Clone)]
-pub enum AppState {
-    Idle,
-    Focusing(f32), // Tiempo restante (sincronizado con core)
-    Break,
-    Completed,
-    Paused,
-    Resuming,
-}
-
-impl AppState {
-    pub fn tick(&mut self, delta: f32) {
-        if let AppState::Focusing(seconds_left) = self {
-            if *seconds_left > 0.0 {
-                *seconds_left -= delta;
-            } else {
-                *self = AppState::Completed;
-            }
-        }
-    }
-    
-    pub fn display(&self) -> String {
-        match self {
-            AppState::Idle => "Estado: Idle".to_string(),
-            AppState::Focusing(seconds) => {
-                let mins = (*seconds / 60.0).round() as i32;
-                let secs = ((*seconds % 60.0) * 100.0).round() as i32 / 100;
-                format!("⏱️ FOCUS: {}m {:02}s", mins, secs)
-            },
-            AppState::Break => "🌿 DESCANSO".to_string(),
-            AppState::Completed => "✨ COMPLETADO".to_string(),
-            _ => "En transición...".to_string(),
-        }
-    }
-}
-
 fn main() -> iced::Result {
-    // 🎨 Aplicar tema Solarpunk con colores personalizados usando Iced 0.13
-    
+    // (#6) Inicializar logger antes de la UI
+    infra::init_logger(false);
+
     iced::application(App::title, App::update, App::view)
         .window(window::Settings {
             size: iced::Size::new(1024.0, 768.0),
@@ -345,6 +282,6 @@ fn main() -> iced::Result {
             ..Default::default()
         })
         .theme(|_| iced::Theme::Dark)
-        .subscription(App::subscription) // ✅ Suscripción para ticks precisos
-        .run_with(|| App::new())
+        .subscription(App::subscription)
+        .run_with(App::new)
 }

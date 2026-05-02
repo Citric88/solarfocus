@@ -3,8 +3,12 @@
 //! ⚠️ **NUNCA GUARDA:** Contraseñas, tokens, datos personales sensibles
 //! ✅ **SOLO GUARDA:** Timestamps, duraciones, estados (datos anónimos de productividad)
 
+#![allow(dead_code)] // Public infra API; not all consumers wired yet.
+
 use rusqlite::{Connection, Result as SqlResult};
 use chrono::{DateTime, Utc};
+use directories::ProjectDirs;
+use std::path::PathBuf;
 
 /// Estructura para registro de sesión en base de datos
 #[derive(Debug)]
@@ -18,32 +22,21 @@ pub struct SessionRecord {
 /// Gestor de persistencia SQLite con privacidad garantizada
 pub struct SessionRepository {
     conn: Connection,
-    /// Flag para encriptar ruta del DB si se activa en fase 2
-    encrypt_path: bool,
 }
 
 impl SessionRepository {
     /// Crea una nueva conexión y inicializa la base de datos
     pub fn new() -> SqlResult<Self> {
-        Self::new_with_encrypt(false) // Default: sin encriptación (fase 1)
+        Self::new_at_path(&Self::default_db_path())
     }
-    
-    /// Crea repositorio con opción de encriptar ruta del DB
-    pub fn new_with_encrypt(encrypt_path: bool) -> SqlResult<Self> {
-        let db_path = if encrypt_path {
-            "data/solarfocus.enc.db" // Ruta encriptada (fase 2)
-        } else {
-            "data/solarfocus.db"     // Ruta normal (fase 1)
-        };
-        
-        // Crear directorio si no existe
-        if let Some(parent) = std::path::Path::new(db_path).parent() {
+
+    /// Crea una conexión apuntando a una ruta concreta (útil para tests)
+    pub fn new_at_path(db_path: &std::path::Path) -> SqlResult<Self> {
+        if let Some(parent) = db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        
+
         let conn = Connection::open(db_path)?;
-        
-        // Crear tabla sessions con schema seguro (solo datos anonimizados)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,11 +47,20 @@ impl SessionRepository {
             )",
             [],
         )?;
-        
-        Ok(Self { 
-            conn, 
-            encrypt_path,
-        })
+
+        Ok(Self { conn })
+    }
+
+    /// Resuelve la ruta del DB según OS (#21)
+    /// macOS: ~/Library/Application Support/SolarFocus/solarfocus.db
+    /// Linux: ~/.local/share/solarfocus/solarfocus.db
+    /// Windows: %APPDATA%\SolarFocus\solarfocus.db
+    fn default_db_path() -> PathBuf {
+        if let Some(proj_dirs) = ProjectDirs::from("os", "SolarFocus", "SolarFocus") {
+            proj_dirs.data_dir().join("solarfocus.db")
+        } else {
+            PathBuf::from("data/solarfocus.db")
+        }
     }
     
     /// Guarda un registro de sesión al finalizarla
@@ -82,128 +84,124 @@ impl SessionRepository {
     
     /// Obtiene estadísticas de sesiones del día actual (anonimizado)
     pub fn get_today_stats(&self) -> SqlResult<Vec<SessionRecord>> {
-        let _today = Utc::now().date_naive();
-        
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state FROM sessions 
+            "SELECT id, start_time, duration, state FROM sessions
              WHERE date(start_time) = date('now', 'start of day') ORDER BY start_time DESC"
         )?;
-        
+
         let mut rows = stmt.query([])?;
-        
         let mut records = Vec::new();
         while let Some(row) = rows.next()? {
-            records.push(SessionRecord {
-                id: row.get(0)?,
-                start_time: { let s: String = row.get(1)?; DateTime::parse_from_rfc3339(&s).unwrap_or_else(|_| Utc::now().into()).with_timezone(&Utc) },
-                duration: row.get::<_, f64>(2)? as f32,
-                state: row.get(3)?,
-            });
+            records.push(row_to_record(row)?);
         }
-        
         Ok(records)
     }
-    
+
     /// Obtiene total de sesiones completadas hoy (anonimizado)
     pub fn sessions_completed_today(&self) -> SqlResult<u32> {
-        let today = Utc::now().date_naive();
-        
-        let count: u32 = self.conn.query_row(
+        self.conn.query_row(
             "SELECT COUNT(*) FROM sessions WHERE state = 'completed' AND date(start_time) = date('now', 'start of day')",
             [],
             |row| row.get(0),
-        )?;
-        
-        Ok(count)
+        )
     }
-    
+
     /// Obtiene todas las sesiones (para depuración - anonimizado)
     pub fn list_all_sessions(&self) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, start_time, duration, state FROM sessions ORDER BY id DESC LIMIT 10"
         )?;
-        
+
         let mut rows = stmt.query([])?;
-        
         let mut records = Vec::new();
         while let Some(row) = rows.next()? {
-            records.push(SessionRecord {
-                id: row.get(0)?,
-                start_time: { let s: String = row.get(1)?; DateTime::parse_from_rfc3339(&s).unwrap_or_else(|_| Utc::now().into()).with_timezone(&Utc) },
-                duration: row.get::<_, f64>(2)? as f32,
-                state: row.get(3)?,
-            });
+            records.push(row_to_record(row)?);
         }
-        
         Ok(records)
     }
-    
+
     /// Limpia sesiones antiguas (más de 90 días) - mantenimiento
     pub fn cleanup_old_sessions(&self) -> SqlResult<usize> {
-        let count = self.conn.execute(
+        self.conn.execute(
             "DELETE FROM sessions WHERE date(start_time) < date('now', '-90 days')",
             [],
-        )?;
-        
-        Ok(count)
+        )
     }
 }
 
-impl Drop for SessionRepository {
-    fn drop(&mut self) {
-        // Forzar garbage collection manual de SQLite
-        #[cfg(feature = "garbage-collect")]
-        {
-            use rusqlite::ffi;
-            let _ = unsafe { ffi::sqlite3_soft_heap_limit64(self.conn.handle(), 0) };
-        }
-    }
+fn row_to_record(row: &rusqlite::Row<'_>) -> SqlResult<SessionRecord> {
+    let s: String = row.get(1)?;
+    let start_time = DateTime::parse_from_rfc3339(&s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    Ok(SessionRecord {
+        id: row.get(0)?,
+        start_time,
+        duration: row.get::<_, f64>(2)? as f32,
+        state: row.get(3)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn fresh_repo() -> SessionRepository {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("solarfocus_test_{}_{}.db", std::process::id(), n));
+        let _ = std::fs::remove_file(&path);
+        SessionRepository::new_at_path(&path).unwrap()
+    }
+
     #[test]
     fn test_session_repository_creation() {
-        let repo = SessionRepository::new().unwrap();
-        assert!(repo.conn.exists("sessions").unwrap());
+        let repo = fresh_repo();
+        let count: i64 = repo
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
-    
+
     #[test]
     fn test_save_and_load_session() {
-        let repo = SessionRepository::new().unwrap();
-        
-        // Crear sesión de prueba (datos anonimizados)
+        let repo = fresh_repo();
+
         let record = SessionRecord {
             id: None,
             start_time: Utc::now(),
             duration: 25.0,
             state: "focus".to_string(),
         };
-        
+
         let id = repo.save_session(&record).unwrap();
         assert!(id > 0);
-        
-        // Verificar que se guardó (solo datos anonimizados)
+
         let all_sessions = repo.list_all_sessions().unwrap();
         assert_eq!(all_sessions.len(), 1);
     }
-    
+
+    /// Phase 1: validación de datos no implementada — registra la limitación actual.
+    /// Cuando se añada validación, este test debe convertirse en assert!(result.is_err()).
     #[test]
-    fn test_privacy_no_sensitive_data() {
-        let repo = SessionRepository::new().unwrap();
-        
-        // Intentar guardar datos sensibles debe fallar por diseño
-        let sensitive_record = SessionRecord {
+    fn test_phase1_no_strict_validation() {
+        let repo = fresh_repo();
+
+        let invalid_record = SessionRecord {
             id: None,
             start_time: Utc::now(),
-            duration: 0.0,      // Sin duración válida
-            state: "invalid".to_string(), // Estado no permitido
+            duration: 0.0,
+            state: "invalid".to_string(),
         };
-        
-        // Debería fallar en producción (validación futura)
-        let result = repo.save_session(&sensitive_record);
-        assert!(result.is_ok()); // Fase 1: sin validación estricta
+
+        let result = repo.save_session(&invalid_record);
+        assert!(result.is_ok(), "Phase 1: no strict validation yet (TODO phase 2)");
     }
 }

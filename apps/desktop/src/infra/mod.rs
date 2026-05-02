@@ -1,5 +1,7 @@
+#![allow(dead_code)] // Public infra surface; helpers consumed in later phases.
+
 //! # Infraestructura de Persistencia y Logging - PRIVACY FIRST
-//! 
+//!
 //! Módulo de infraestructura para SolarFocus Desktop.
 //! Privacidad: Cero telemetría, todo procesamiento local.
 
@@ -9,7 +11,7 @@ pub mod encryption;
 // 🗄️ Persistencia SQLite básica
 pub mod persistence;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 /// Inicializa el logger global con stdout + archivo
 pub fn init_logger(encrypt_path: bool) {
@@ -25,33 +27,23 @@ pub fn init_logger(encrypt_path: bool) {
     env_logger::Builder::new()
         .format(|buf, record| {
             use std::io::Write;
-            
-            // Timestamp ISO 8601
+
             let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S%.f").to_string();
-            
-            write!(buf, "[{}] ", timestamp).unwrap();
-            
-            // Nivel de log con emoji para visibilidad
-            let level_icon = match record.level() {
-                log::Level::Error => "❌",
-                log::Level::Warn  => "⚠️ ",
-                log::Level::Info  => "📝 ",
-                log::Level::Debug => "🔍 ",
-                _ => "",
-            };
-            
-            write!(buf, "{}{} ", level_icon, record.level()).unwrap();
-            
-            // Mensaje original
-            writeln!(buf, "{}", record.args()).unwrap();
-            
-            Ok(())
+            writeln!(
+                buf,
+                "[{}] {:<5} [{}] {}",
+                timestamp,
+                record.level(),
+                record.target(),
+                record.args()
+            )
         })
-        .filter_module("solar_focus", log::LevelFilter::Info)
+        .filter_module("solarfocus_desktop", log::LevelFilter::Info)
+        .filter_module("solar_focus_core", log::LevelFilter::Info)
         .parse_default_env()
         .init();
-    
-    println!("📝 Logger inicializado: stdout + {}", log_path);
+
+    log::info!("Logger inicializado: stdout + {}", log_path);
 }
 
 /// Obtiene ruta del archivo de logs (configurable vía env var)
@@ -65,22 +57,22 @@ pub fn log_session_event(level: log::Level, event: &str, data: &str) {
     log::log!(level, "{}: {}", event, data);
 }
 
-/// Verifica que logs no contengan datos sensibles
+/// Verifica que logs no contengan datos sensibles (substring check, sin regex)
 pub fn sanitize_log_input(input: &str) -> String {
-    // Regex para detectar patrones sensibles (contraseñas, tokens, etc.)
-    let sensitive_patterns = [
-        r"password\s*[=:]\s*[\w]+",
-        r"token\s*[=:]\s*[\w\-]+",
-        r"secret\s*[=:]\s*[\w]+",
-        r"api_key\s*[=:]\s*[\w\-]+",
-    ];
-    
-    for pattern in &sensitive_patterns {
-        if input.contains(pattern) {
-            eprintln!("❌ Patrón sensible detectado en: {}", input);
-            return "".to_string(); // Rechazar log con datos sensibles
+    let lower = input.to_ascii_lowercase();
+    let sensitive_keys = ["password", "token", "secret", "api_key", "apikey", "authorization"];
+
+    for key in &sensitive_keys {
+        // Detecta "key=" o "key:" o "key =" / "key :"
+        if let Some(idx) = lower.find(key) {
+            let after = &lower[idx + key.len()..];
+            let trimmed = after.trim_start();
+            if trimmed.starts_with('=') || trimmed.starts_with(':') {
+                eprintln!("❌ Patrón sensible detectado: clave='{}'", key);
+                return String::new();
+            }
         }
     }
-    
+
     input.to_string()
 }

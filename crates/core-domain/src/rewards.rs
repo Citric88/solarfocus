@@ -3,10 +3,8 @@
 //! Implementación simple de sistema de experiencia y niveles.
 //! Lógica pura sin dependencias externas.
 
-use crate::state::{AppState, PomodoroSession};
-
-/// XP base por sesión completada (segundos / 10)
-pub const BASE_XP_PER_SECOND: f32 = 1.0;
+/// XP base por segundo de sesión (segundos × 0.1 → 30s = 3 XP)
+pub const BASE_XP_PER_SECOND: f32 = 0.1;
 
 /// Multiplicador de XP según racha de sesiones
 pub const STREAK_BONUS_MULTIPLIER: f32 = 1.5; // +50% XP con racha
@@ -66,22 +64,22 @@ impl RewardData {
         (base_xp as f32 * streak_bonus) as u32
     }
     
-    /// Aplica XP ganado por una sesión
+    /// Aplica XP ganado por una sesión. Devuelve true si subió al menos un nivel.
     pub fn apply_xp(&mut self, xp_gained: u32) -> bool {
-        let old_total = self.total_xp;
-        self.total_xp += xp_gained;
-        
-        // Verificar nivel up
-        if self.total_xp >= XP_TO_LEVEL_UP * (self.level as u32 + 1) {
-            let target_xp = XP_TO_LEVEL_UP * (self.level as u32 + 1);
-            if self.total_xp >= target_xp {
-                self.level += 1;
-                println!("🎊 ¡Nivel {} alcanzado! 🎊", self.level); // En producción: usar logger
-                return true;
-            }
+        if xp_gained == 0 {
+            return false;
         }
-        
-        old_total != self.total_xp
+        self.total_xp = self.total_xp.saturating_add(xp_gained);
+
+        // Multi-level up: cada XP_TO_LEVEL_UP cumulativos sube un nivel (#11)
+        let target_level = ((self.total_xp / XP_TO_LEVEL_UP) as u8).saturating_add(1);
+        if target_level > self.level {
+            self.level = target_level;
+            println!("🎊 ¡Nivel {} alcanzado! 🎊", self.level);
+            true
+        } else {
+            false
+        }
     }
     
     /// Incrementa la racha actual
@@ -104,18 +102,14 @@ impl RewardData {
     
     /// Obtiene el XP necesario para el siguiente nivel
     pub fn xp_to_next_level(&self) -> u32 {
-        let target_xp = XP_TO_LEVEL_UP * ((self.level as u32 + 1) as u32);
-        target_xp.saturating_sub(self.total_xp as u32)
+        let target_xp = XP_TO_LEVEL_UP * (self.level as u32);
+        target_xp.saturating_sub(self.total_xp)
     }
-    
-    /// Obtiene porcentaje de progreso al siguiente nivel
+
+    /// Obtiene porcentaje de progreso al siguiente nivel (XP dentro del nivel actual)
     pub fn progress_to_next_level(&self) -> f32 {
-        let current = self.total_xp as f32;
-        let next = (XP_TO_LEVEL_UP * (self.level as u32 + 1)) as f32;
-        if current >= next {
-            return 1.0;
-        }
-        (current / next).min(1.0)
+        let xp_in_level = self.total_xp % XP_TO_LEVEL_UP;
+        (xp_in_level as f32 / XP_TO_LEVEL_UP as f32).clamp(0.0, 1.0)
     }
     
     /// Obtiene nombre del nivel basado en XP
@@ -146,10 +140,6 @@ impl Default for RewardData {
 pub struct RewardsSystem {
     /// Datos actuales de recompensas
     data: RewardData,
-    
-    /// Tiempo del día (para resetear sesiones al medianoche)
-    /// En fase 1 usamos timestamp simple, en producción usar fecha/hora real
-    last_day_reset: Option<std::time::Instant>,
 }
 
 impl RewardsSystem {
@@ -157,7 +147,6 @@ impl RewardsSystem {
     pub fn new() -> Self {
         Self {
             data: RewardData::new(),
-            last_day_reset: Some(std::time::Instant::now()), // Inicializar hoy
         }
     }
     
@@ -223,27 +212,25 @@ mod tests {
     #[test]
     fn test_level_up() {
         let mut data = RewardData::new();
-        
-        // Acumular XP hasta nivel 2
-        for _ in 0..10 {
-            let xp = data.calculate_xp_for_session(30.0);
+
+        // 5 sesiones de 200s = 5 × 20 XP = 100 XP → nivel 2
+        for _ in 0..5 {
+            let xp = data.calculate_xp_for_session(200.0);
             data.apply_xp(xp);
         }
-        
+
         assert_eq!(data.level, 2);
     }
-    
+
     #[test]
     fn test_progress_calculation() {
-        let data = RewardData::new();
+        let mut data = RewardData::new();
         assert!((data.progress_to_next_level() - 0.0).abs() < 0.01);
-        
-        // Acumular 50 XP (mitad del camino a nivel 2)
-        for _ in 0..5 {
-            let xp = data.calculate_xp_for_session(30.0);
-            data.apply_xp(xp);
-        }
-        
+
+        // Acumular 50 XP (mitad del camino al siguiente nivel)
+        let xp = data.calculate_xp_for_session(500.0); // 500 × 0.1 = 50 XP
+        data.apply_xp(xp);
+
         assert!((data.progress_to_next_level() - 0.5).abs() < 0.01);
     }
 }

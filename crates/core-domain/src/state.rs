@@ -46,7 +46,7 @@ impl PomodoroSession {
     pub fn new(duration_seconds: f32) -> Self {
         Self {
             duration: duration_seconds,
-            remaining: 0.0,
+            remaining: duration_seconds,
             state: AppState::Idle,
             start_time: None,
             total_paused: 0.0,
@@ -62,21 +62,18 @@ impl PomodoroSession {
     
     /// Aplica un delta de tiempo (ej: desde frame anterior)
     pub fn tick(&mut self, delta: f32) {
-        match &mut self.state {
-            AppState::Focusing(remaining) => {
-                if *remaining > 0.0 {
-                    *remaining -= delta;
-                    
-                    // Si termina exactamente en 0, marcar como completed
-                    if *remaining <= 0.0 {
-                        self.remaining = 0.0;
-                        self.state = AppState::Completed;
-                    }
-                } else {
+        if let AppState::Focusing(_) = self.state {
+            if self.remaining > 0.0 {
+                self.remaining -= delta;
+                if self.remaining <= 0.0 {
+                    self.remaining = 0.0;
                     self.state = AppState::Completed;
+                } else {
+                    self.state = AppState::Focusing(self.remaining);
                 }
-            },
-            _ => {} // No hacer nada en otros estados
+            } else {
+                self.state = AppState::Completed;
+            }
         }
     }
     
@@ -84,10 +81,11 @@ impl PomodoroSession {
     pub fn finish(&mut self) {
         match self.state {
             AppState::Completed | AppState::Focusing(_) => {
+                let elapsed = self.duration - self.remaining;
+                self.total_paused += elapsed;
                 self.state = AppState::Idle;
                 self.remaining = 0.0;
                 self.start_time = None;
-                self.total_paused += self.duration - self.remaining;
             },
             _ => {} // Ya está en Idle o Completed
         }
@@ -146,27 +144,25 @@ mod tests {
         
         session.tick(5.0);
         assert!((session.remaining - 25.0).abs() < 0.01);
-        
+
         session.tick(25.0);
-        assert!((session.remaining - 0.99).abs() < 0.01); // Pequeño margen por floating point
-        
-        session.tick(0.1);
         assert_eq!(session.state, AppState::Completed);
+        assert!(session.remaining.abs() < 0.01);
     }
-    
+
     #[test]
     fn test_progress_calculation() {
         let mut session = PomodoroSession::new(60.0); // 60 segundos
-        
+
         assert_eq!(session.progress(), 0.0); // Idle
-        
+
         session.start();
-        assert!((session.progress() - 1.0).abs() < 0.01); // Al inicio es 100%
-        
+        assert!((session.progress() - 0.0).abs() < 0.01); // Al inicio es 0% completado
+
         session.tick(15.0);
-        assert!((session.progress() - 0.75).abs() < 0.01); // 25% restante
-        
+        assert!((session.progress() - 0.25).abs() < 0.01); // 25% completado
+
         session.tick(45.0);
-        assert!((session.progress() - 1.0).abs() < 0.01); // Terminado
+        assert!((session.progress() - 1.0).abs() < 0.01); // 100% completado
     }
 }

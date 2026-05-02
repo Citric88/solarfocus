@@ -9,7 +9,7 @@ serde = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 env_logger = { workspace = true }
-aes-gcm = { workspace = true }
+directories = { workspace = true }
 rand = { workspace = true }
 log = { workspace = true }
 solar-focus-core = { path = "../../crates/core-domain" }

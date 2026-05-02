@@ -3,7 +3,6 @@
 //! Sistema de reglas para detectar patrones de productividad y alertar al usuario.
 //! Lógica pura sin dependencias externas.
 
-use crate::state::{AppState, PomodoroSession};
 
 /// Umbral de distracciones antes de alerta (número de sesiones fallidas)
 pub const DISTRACTION_THRESHOLD: u8 = 3;
@@ -209,7 +208,7 @@ mod tests {
     
     #[test]
     fn test_productive_check() {
-        let mut engine = FocusRulesEngine::new();
+        let engine = FocusRulesEngine::new();
         
         // Usuario con 2 sesiones - no es productivo
         assert!(!engine.is_productive(2));
