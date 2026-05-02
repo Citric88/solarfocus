@@ -92,7 +92,6 @@ pub enum Message {
     SkipModelDownload,
     DownloadPoll,
     DownloadFinished(Result<String, String>), // Ok(path) | Err(message)
-    DismissDownloadModal,
     /// Phase 3.5c — engine ready after async load post-download.
     LlmEngineLoaded(Result<(), String>),
     /// Phase 3.5c — manual debug trigger to generate today's recap now.
@@ -139,7 +138,6 @@ pub struct App {
     // Phase 3.5b — download lifecycle.
     // download_progress is only *read* on llm builds; mark allow on default
     // builds to avoid the dead_code warning.
-    download_modal_open: bool,
     download_active: Arc<AtomicBool>,
     #[allow(dead_code)]
     download_progress: Arc<StdMutex<Option<DownloadSnapshot>>>,
@@ -240,7 +238,7 @@ impl App {
         let classifier = build_classifier(&settings);
 
         log::info!(
-            "v1.2.0-beta2 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
+            "v1.2.0-rc3 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
             settings.ai_enabled,
             settings.language,
             settings.window_poll_secs,
@@ -253,8 +251,29 @@ impl App {
             .as_ref()
             .and_then(|r| r.latest_summary().ok().flatten());
 
-        // First-run download check — only when LLM feature is on.
-        let download_modal_open = first_run_should_offer_download(&settings);
+        // FIX-1: derive `last_summary_date` from the actual most-recent
+        // summary instead of today_iso_local(). Otherwise a launch on day
+        // N+1 immediately marks today as "already summarized" and yesterday's
+        // recap never fires from DailyRollCheck.
+        let last_summary_date = recap.as_ref().map(|(d, _)| d.clone());
+
+        // FIX-2: initialize today's counters from DB so same-day relaunches
+        // preserve the running count.
+        let today_iso = today_iso_local().unwrap_or_default();
+        let sessions_today = session_repo
+            .as_ref()
+            .and_then(|r| r.sessions_for_date(&today_iso).ok())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|r| r.state == "completed")
+                    .count() as u8
+            })
+            .unwrap_or(0);
+
+        // distractions_today is intentionally ephemeral — we don't persist
+        // them to DB (would require a new schema). Restarting the app
+        // resets this counter; documented behavior for v1.2.0.
+        let distractions_today = 0;
 
         (
             Self {
@@ -267,20 +286,19 @@ impl App {
                 classifier,
                 last_coaching: None,
                 last_classification: None,
-                sessions_today: 0,
+                sessions_today,
                 settings_open: false,
                 session_started_at: None,
                 focus_rules: FocusRulesEngine::new(),
                 consecutive_distraction_samples: 0,
                 toast: None,
-                distractions_today: 0,
+                distractions_today,
                 permission_status: PermissionStatus::Unknown,
                 confirming_clear: false,
-                download_modal_open,
                 download_active: Arc::new(AtomicBool::new(false)),
                 download_progress: Arc::new(StdMutex::new(None)),
                 download_error: None,
-                last_summary_date: today_iso_local(),
+                last_summary_date,
                 recap,
                 route: Route::default(),
                 setup_tab: SetupTab::default(),
@@ -455,23 +473,6 @@ fn today_iso_local() -> Option<String> {
 fn yesterday_iso_local() -> Option<String> {
     let d = chrono::Local::now().date_naive() - chrono::Duration::days(1);
     Some(d.format("%Y-%m-%d").to_string())
-}
-
-#[cfg(feature = "llm")]
-fn first_run_should_offer_download(settings: &Settings) -> bool {
-    use infra::model_download::{manifest_for, model_present};
-    if !settings.ai_enabled || settings.model_download_skipped {
-        return false;
-    }
-    match manifest_for(settings.model_choice) {
-        Some(m) => !model_present(m),
-        None => false,
-    }
-}
-
-#[cfg(not(feature = "llm"))]
-fn first_run_should_offer_download(_settings: &Settings) -> bool {
-    false
 }
 
 impl App {
@@ -778,7 +779,6 @@ impl App {
             }
 
             Message::StartModelDownload => {
-                self.download_modal_open = true; // keep modal showing while progress flows
                 self.download_error = None;
                 self.spawn_download()
             }
@@ -786,7 +786,6 @@ impl App {
                 log::info!("User skipped first-run model download");
                 self.settings.model_download_skipped = true;
                 self.settings.save();
-                self.download_modal_open = false;
                 Task::none()
             }
             Message::DownloadPoll => {
@@ -798,7 +797,6 @@ impl App {
                 match result {
                     Ok(p) => {
                         log::info!("Model downloaded: {}", p);
-                        self.download_modal_open = false;
                         self.download_error = None;
                         self.toast = Some(Toast {
                             text: match self.settings.language {
@@ -902,7 +900,39 @@ impl App {
                 self.settings.first_run = false;
                 self.settings.save();
                 self.wizard_step = WizardStep::Done;
-                self.route = Route::Focus;
+
+                // FIX-3: if user picked Full mode but never triggered the
+                // download in the wizard (and the model isn't already on
+                // disk), land them on Setup → AI so the next visible step
+                // is obvious. Otherwise → Focus.
+                let needs_model_setup = self.settings.ram_mode
+                    == infra::settings::RamMode::Full
+                    && {
+                        #[cfg(feature = "llm")]
+                        {
+                            use infra::model_download::{manifest_for, model_present};
+                            manifest_for(self.settings.model_choice)
+                                .map(|m| !model_present(m))
+                                .unwrap_or(false)
+                        }
+                        #[cfg(not(feature = "llm"))]
+                        {
+                            false
+                        }
+                    };
+                if needs_model_setup {
+                    self.route = Route::Setup;
+                    self.setup_tab = SetupTab::Ai;
+                    self.toast = Some(Toast {
+                        text: match self.settings.language {
+                            Language::Es => "Descarga el modelo IA cuando estés listo.".to_string(),
+                            Language::En => "Download the AI model when you're ready.".to_string(),
+                        },
+                        expires_at: Instant::now() + Duration::from_secs(6),
+                    });
+                } else {
+                    self.route = Route::Focus;
+                }
                 Task::none()
             }
             Message::SwitchRoute(r) => {
@@ -1005,10 +1035,6 @@ impl App {
                     },
                     expires_at: Instant::now() + Duration::from_secs(2),
                 });
-                Task::none()
-            }
-            Message::DismissDownloadModal => {
-                self.download_modal_open = false;
                 Task::none()
             }
             Message::DeleteModel => {
