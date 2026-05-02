@@ -78,6 +78,10 @@ pub enum Message {
     WizardBack,
     WizardFinish,
 
+    // WIRE-2 — runtime permission probe
+    ProbePermission,
+    PermissionProbed(PermissionStatus),
+
     // Phase 3.5b — model download flow
     StartModelDownload,
     SkipModelDownload,
@@ -117,6 +121,12 @@ pub struct App {
     focus_rules: FocusRulesEngine,
     consecutive_distraction_samples: u8,
     toast: Option<Toast>,
+
+    // WIRE-2 — counters reset at midnight via DailyRollCheck
+    distractions_today: u32,
+
+    // WIRE-2 — cached macOS Screen Recording permission probe
+    permission_status: PermissionStatus,
 
     // Phase 3.5b — download lifecycle.
     // download_progress is only *read* on llm builds; mark allow on default
@@ -172,6 +182,27 @@ pub struct DownloadSnapshot {
 struct Toast {
     text: String,
     expires_at: Instant,
+}
+
+/// Result of probing the foreground-window API. Drives the Privacy / Stats
+/// "permission status" badges. Cached on App; refreshed lazily.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionStatus {
+    /// Haven't probed yet this session.
+    Unknown,
+    /// Got both process_name and a non-empty title — permission granted.
+    Granted,
+    /// Got process_name but no title — typical of macOS without Screen
+    /// Recording permission.
+    NameOnly,
+    /// `active_win_pos_rs` returned Err — no window readable at all.
+    Denied,
+}
+
+impl Default for PermissionStatus {
+    fn default() -> Self {
+        PermissionStatus::Unknown
+    }
 }
 
 impl App {
@@ -234,6 +265,8 @@ impl App {
                 focus_rules: FocusRulesEngine::new(),
                 consecutive_distraction_samples: 0,
                 toast: None,
+                distractions_today: 0,
+                permission_status: PermissionStatus::Unknown,
                 download_modal_open,
                 download_active: Arc::new(AtomicBool::new(false)),
                 download_progress: Arc::new(StdMutex::new(None)),
@@ -244,7 +277,7 @@ impl App {
                 setup_tab: SetupTab::default(),
                 wizard_step: WizardStep::Welcome,
             },
-            Task::none(),
+            Task::done(Message::ProbePermission),
         )
     }
 
@@ -651,9 +684,12 @@ impl App {
                     if self.consecutive_distraction_samples >= self.settings.min_consecutive_samples
                     {
                         self.focus_rules.record_distraction();
+                        self.distractions_today =
+                            self.distractions_today.saturating_add(1);
                         log::warn!(
-                            "Distraction confirmed (consecutive={}, rule={:?})",
+                            "Distraction confirmed (consecutive={}, today={}, rule={:?})",
                             self.consecutive_distraction_samples,
+                            self.distractions_today,
                             c.matched_rule
                         );
                         let toast_text = match self.settings.language {
@@ -864,12 +900,25 @@ impl App {
                 if r != self.route {
                     log::info!("Route → {:?}", r);
                     self.route = r;
-                    // Closing settings_open ensures the legacy settings modal
-                    // doesn't shadow the new Setup canvas. Same for the
-                    // download modal — only stays for first-run.
                     if self.route != Route::Setup {
                         self.settings_open = false;
                     }
+                    // WIRE-2: re-probe permission when switching to a route
+                    // that surfaces it.
+                    if matches!(self.route, Route::Stats | Route::Setup) {
+                        return Task::done(Message::ProbePermission);
+                    }
+                }
+                Task::none()
+            }
+            Message::ProbePermission => {
+                let status = probe_permission_now();
+                Task::done(Message::PermissionProbed(status))
+            }
+            Message::PermissionProbed(status) => {
+                if status != self.permission_status {
+                    log::info!("Permission → {:?}", status);
+                    self.permission_status = status;
                 }
                 Task::none()
             }
@@ -944,6 +993,9 @@ impl App {
                 if last.as_deref() == Some(today.as_str()) {
                     return Task::none();
                 }
+                // Date rollover: reset per-day counters BEFORE summarizing.
+                self.distractions_today = 0;
+                self.sessions_today = 0;
                 self.last_summary_date = Some(today.clone());
 
                 let yesterday = match yesterday_iso_local() {
@@ -1072,6 +1124,18 @@ impl App {
             iced::widget::Space::with_width(SPACE_MD as f32),
             card(
                 match self.settings.language {
+                    Language::Es => "DISTRACCIONES",
+                    Language::En => "DISTRACTIONS",
+                },
+                format!("{}", self.distractions_today),
+                match self.settings.language {
+                    Language::Es => "hoy",
+                    Language::En => "today",
+                },
+            ),
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            card(
+                match self.settings.language {
                     Language::Es => "ESTA SEMANA",
                     Language::En => "THIS WEEK",
                 },
@@ -1088,6 +1152,114 @@ impl App {
                 &format!("{} h totales", lifetime_secs / 3600),
             ),
         ];
+
+        // WIRE-2: permission status indicator.
+        let (perm_color, perm_text_es, perm_text_en) = match self.permission_status {
+            PermissionStatus::Granted => (
+                ACCENT,
+                "Permiso concedido — vigilancia completa",
+                "Permission granted — full window watching",
+            ),
+            PermissionStatus::NameOnly => (
+                WARNING,
+                "Permiso parcial — solo nombre del proceso (concede Screen Recording para títulos)",
+                "Partial permission — process names only (grant Screen Recording for titles)",
+            ),
+            PermissionStatus::Denied => (
+                DANGER,
+                "Sin permiso — no se puede leer la ventana activa",
+                "No permission — can't read active window",
+            ),
+            PermissionStatus::Unknown => (
+                TEXT_MUTED,
+                "Verificando permiso…",
+                "Checking permission…",
+            ),
+        };
+        let perm_card: Element<'_, Message> = container(
+            iced::widget::row![
+                text("●").size(FONT_LEAD).color(perm_color),
+                iced::widget::Space::with_width(SPACE_SM as f32),
+                text(if self.settings.language == Language::Es {
+                    perm_text_es
+                } else {
+                    perm_text_en
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+            ]
+            .padding(SPACE_SM as u16),
+        )
+        .padding(SPACE_XS as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into();
+
+        // WIRE-2: today's session list (drill-down).
+        let today_iso = today_iso_local().unwrap_or_default();
+        let today_sessions = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.sessions_for_date(&today_iso).ok())
+            .unwrap_or_default();
+        let sessions_list: Element<'_, Message> = if today_sessions.is_empty() {
+            container(
+                text(match self.settings.language {
+                    Language::Es => "Aún no has completado sesiones hoy.",
+                    Language::En => "No completed sessions yet today.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            let rows: Vec<Element<'_, Message>> = today_sessions
+                .into_iter()
+                .map(|s| {
+                    let when = s.start_time.format("%H:%M").to_string();
+                    let mins = (s.duration / 60.0).round() as u32;
+                    container(
+                        iced::widget::row![
+                            text(when).size(FONT_SMALL).color(TEXT_SECONDARY),
+                            iced::widget::Space::with_width(SPACE_MD as f32),
+                            text(format!("{} min · {}", mins, s.state))
+                                .size(FONT_SMALL)
+                                .color(TEXT_PRIMARY),
+                        ]
+                        .padding(SPACE_XS as u16),
+                    )
+                    .padding(SPACE_XS as u16)
+                    .into()
+                })
+                .collect();
+            container(column(rows).spacing(SPACE_XS as u16))
+                .padding(SPACE_SM as u16)
+                .width(Length::Fixed(560.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 6.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
 
         // Weekly chart — convert ISO dates to single-letter weekday labels.
         let chart_bars: Vec<(String, u32)> = week
@@ -1130,16 +1302,26 @@ impl App {
         let recap_card: Element<'_, Message> = if let Some((d, t)) = &self.recap {
             container(
                 column![
-                    text(format!(
-                        "{} {}",
-                        match self.settings.language {
-                            Language::Es => "Resumen de",
-                            Language::En => "Recap of",
-                        },
-                        d
-                    ))
-                    .size(FONT_SMALL)
-                    .color(TEXT_MUTED),
+                    iced::widget::row![
+                        text(format!(
+                            "{} {}",
+                            match self.settings.language {
+                                Language::Es => "Resumen de",
+                                Language::En => "Recap of",
+                            },
+                            d
+                        ))
+                        .size(FONT_SMALL)
+                        .color(TEXT_MUTED),
+                        iced::widget::horizontal_space(),
+                        ghost_button(
+                            match self.settings.language {
+                                Language::Es => "Regenerar",
+                                Language::En => "Regenerate",
+                            },
+                            Message::GenerateRecapNow,
+                        ),
+                    ],
                     text(t.clone()).size(FONT_BODY).color(TEXT_PRIMARY),
                 ]
                 .spacing(SPACE_XS as u16),
@@ -1156,8 +1338,45 @@ impl App {
             })
             .into()
         } else {
-            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+            // No recap yet — offer "Generate today's recap" button.
+            container(
+                iced::widget::row![
+                    text(match self.settings.language {
+                        Language::Es => "Aún no hay resumen del día.",
+                        Language::En => "No daily recap yet.",
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+                    iced::widget::horizontal_space(),
+                    ghost_button(
+                        match self.settings.language {
+                            Language::Es => "Generar ahora",
+                            Language::En => "Generate now",
+                        },
+                        Message::GenerateRecapNow,
+                    ),
+                ]
+                .padding(SPACE_SM as u16),
+            )
+            .padding(SPACE_XS as u16)
+            .width(Length::Fixed(560.0))
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
         };
+
+        let sessions_title = text(match self.settings.language {
+            Language::Es => "Sesiones de hoy",
+            Language::En => "Today's sessions",
+        })
+        .size(FONT_BODY)
+        .color(TEXT_SECONDARY);
 
         let body = column![
             text(match self.settings.language {
@@ -1166,9 +1385,12 @@ impl App {
             })
             .size(FONT_TITLE)
             .color(TEXT_PRIMARY),
+            perm_card,
             cards,
             chart_card,
             recap_card,
+            sessions_title,
+            sessions_list,
         ]
         .spacing(SPACE_LG as u16)
         .padding(SPACE_XL as u16)
@@ -2544,6 +2766,18 @@ fn on_off(b: bool) -> &'static str {
         "ON"
     } else {
         "OFF"
+    }
+}
+
+/// Synchronous one-off probe of the foreground-window API. Cheap (~ms);
+/// safe to call from update() since iced's update is on the main thread.
+fn probe_permission_now() -> PermissionStatus {
+    match infra::window_watch::WindowWatcher::poll(0) {
+        Some(s) => match s.window_title {
+            Some(t) if !t.trim().is_empty() => PermissionStatus::Granted,
+            _ => PermissionStatus::NameOnly,
+        },
+        None => PermissionStatus::Denied,
     }
 }
 
