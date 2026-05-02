@@ -4,4 +4,5 @@
 //! business logic stay in main.rs and infra.
 
 pub mod palette;
+pub mod ring;
 pub mod sidebar;

@@ -1154,176 +1154,73 @@ impl App {
             .into()
     }
 
+    /// UI-2: Focus canvas — hero timer, ring progress, single context-aware
+    /// CTA, microcopy slot. No top bar (sidebar handles nav). No recap card
+    /// (lives in Stats canvas). Toast overlays the top of the canvas.
     fn view_main(&self) -> Element<'_, Message> {
-        let bg = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Focusing(_) => Color::from_rgb(0.06, 0.12, 0.08),
-            SolarFocusCore::AppState::Break => Color::from_rgb(0.70, 0.86, 1.00),
-            _ => Color::from_rgb(0.04, 0.06, 0.05),
-        };
-
-        let title = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Idle => "SolarFocus OS",
-            SolarFocusCore::AppState::Focusing(_) => "En Foco",
-            SolarFocusCore::AppState::Break => "Descanso",
-            SolarFocusCore::AppState::Completed => "Sesión Completada",
-        };
-
-        let status_text = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Idle => "Esperando inicio...".to_string(),
-            SolarFocusCore::AppState::Focusing(_) => {
-                let suffix = if self.pomodoro_engine.is_paused() {
-                    " (PAUSADO)"
-                } else {
-                    ""
-                };
-                format!(
-                    "FOCUS: {}{}",
-                    self.pomodoro_engine.remaining_time_formatted(),
-                    suffix
-                )
-            }
-            SolarFocusCore::AppState::Break => {
-                format!("BREAK: {}", self.pomodoro_engine.remaining_time_formatted())
-            }
-            SolarFocusCore::AppState::Completed => "Excelente trabajo!".to_string(),
-        };
+        use iced::widget::stack;
+        use ui::palette::*;
 
         let progress = self.pomodoro_engine.progress();
-        let bar = progress_bar(0.0..=1.0, progress).width(Length::Fixed(280.0));
-
-        let progress_label = match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Focusing(_) | SolarFocusCore::AppState::Break => {
-                format!("Progreso: {:.0}%", progress * 100.0)
-            }
-            _ => String::new(),
-        };
-
-        let mut buttons: Vec<Element<'_, Message>> = Vec::new();
-        let in_focus = matches!(
-            self.pomodoro_engine.state(),
-            SolarFocusCore::AppState::Focusing(_)
-        );
-        let in_break = matches!(
-            self.pomodoro_engine.state(),
-            SolarFocusCore::AppState::Break
-        );
         let is_paused = self.pomodoro_engine.is_paused();
 
-        if matches!(
+        let (ring_color, time_color) = match self.pomodoro_engine.state() {
+            SolarFocusCore::AppState::Focusing(_) => (ACCENT, TEXT_PRIMARY),
+            SolarFocusCore::AppState::Break => (ON_BREAK, ON_BREAK),
+            SolarFocusCore::AppState::Completed => (ACCENT, ACCENT),
+            SolarFocusCore::AppState::Idle => (TEXT_MUTED, TEXT_MUTED),
+        };
+
+        // Hero ring + timer (320×320 stack).
+        let timer_text = if matches!(
             self.pomodoro_engine.state(),
-            SolarFocusCore::AppState::Idle | SolarFocusCore::AppState::Completed
+            SolarFocusCore::AppState::Idle
         ) {
-            buttons.push(primary_button("START FOCUS", Message::StartFocus));
-        }
-        if (in_focus || in_break) && !is_paused {
-            buttons.push(secondary_button("PAUSE", Message::Pause));
-        }
-        if (in_focus || in_break) && is_paused {
-            buttons.push(secondary_button("RESUME", Message::Resume));
-        }
-        if in_focus {
-            buttons.push(secondary_button("TAKE BREAK", Message::TakeBreak));
-        }
-
-        let buttons_col = column(buttons).spacing(10).align_x(Horizontal::Center);
-
-        // Coaching slot + thumbs (Phase 4 feedback)
-        let coaching_slot: Element<'_, Message> = if let Some(ref c) = self.last_coaching {
-            row![
-                text(c.clone())
-                    .size(18)
-                    .color(Color::from_rgb(0.85, 0.95, 0.85)),
-                iced::widget::Space::with_width(12),
-                button(text("👍").size(14))
-                    .on_press(Message::ThumbsUp)
-                    .padding([3, 8])
-                    .style(|_, _| button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(0.18, 0.30, 0.22))),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            radius: 3.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-                iced::widget::Space::with_width(4),
-                button(text("👎").size(14))
-                    .on_press(Message::ThumbsDown)
-                    .padding([3, 8])
-                    .style(|_, _| button::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.18, 0.18))),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            radius: 3.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            ]
-            .into()
+            (self.pomodoro_engine.config().focus_duration as u32 / 60).to_string()
+                + ":00"
         } else {
-            text("").size(18).into()
+            self.pomodoro_engine.remaining_time_formatted()
         };
 
-        // Distraction indicator (small dot + label)
-        let distraction_slot: Element<'_, Message> = if let Some(ref c) = self.last_classification {
-            let (color, label_text) = match c.label {
-                solar_focus_intelligence::ClassificationLabel::Focus => {
-                    (Color::from_rgb(0.3, 0.85, 0.4), "Focus")
-                }
-                solar_focus_intelligence::ClassificationLabel::Distraction => {
-                    (Color::from_rgb(0.95, 0.4, 0.4), "Distraction")
-                }
-                solar_focus_intelligence::ClassificationLabel::Neutral => {
-                    (Color::from_rgb(0.7, 0.7, 0.7), "Neutral")
-                }
-            };
-            row![
-                text("●").size(16).color(color),
-                text(format!(" {} ({:.0}%)", label_text, c.confidence * 100.0))
-                    .size(12)
-                    .color(Color::from_rgb(0.7, 0.7, 0.7)),
+        let ring: Element<'_, Message> = iced::widget::Canvas::new(ui::ring::Ring::new(progress, ring_color))
+            .width(Length::Fixed(320.0))
+            .height(Length::Fixed(320.0))
+            .into();
+        let time_label: Element<'_, Message> = container(
+            column![
+                text(timer_text)
+                    .size(72)
+                    .color(time_color)
+                    .font(iced::Font::MONOSPACE),
+                text(self.state_label())
+                    .size(FONT_SMALL)
+                    .color(TEXT_SECONDARY),
             ]
-            .into()
-        } else {
-            text("").size(12).into()
-        };
-
-        let top_bar: Element<'_, Message> = row![
-            text(format!("Hoy: {} sesiones", self.sessions_today))
-                .size(13)
-                .color(Color::from_rgb(0.6, 0.7, 0.6)),
-            iced::widget::horizontal_space(),
-            button(text("Settings").size(13))
-                .on_press(Message::OpenSettings)
-                .padding([4, 10])
-                .style(|_, _| button::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb(0.15, 0.2, 0.18))),
-                    text_color: Color::from_rgb(0.85, 0.9, 0.85),
-                    border: iced::Border {
-                        radius: 4.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-        ]
-        .padding(10)
+            .spacing(SPACE_XS as u16)
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+        .width(Length::Fixed(320.0))
+        .height(Length::Fixed(320.0))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
         .into();
+        let hero: Element<'_, Message> = stack![ring, time_label].into();
 
-        // Toast banner (Phase 2). Only renders when self.toast is Some.
-        let toast_slot: Element<'_, Message> = if let Some(ref t) = self.toast {
+        // Single context-aware CTA below the ring.
+        let cta = self.cta_button(is_paused);
+
+        // Microcopy or toast (toast wins).
+        let microcopy: Element<'_, Message> = if let Some(t) = &self.toast {
             container(
-                row![
-                    text(t.text.clone())
-                        .size(14)
-                        .color(Color::from_rgb(0.05, 0.05, 0.05)),
+                iced::widget::row![
+                    text(t.text.clone()).size(FONT_BODY).color(BG),
                     iced::widget::horizontal_space(),
-                    button(text("×").size(14))
+                    button(text("×").size(FONT_SMALL))
                         .on_press(Message::DismissToast)
                         .padding([2, 8])
                         .style(|_, _| button::Style {
-                            background: Some(iced::Background::Color(Color::from_rgb(0.95, 0.85, 0.4))),
-                            text_color: Color::from_rgb(0.05, 0.05, 0.05),
+                            background: Some(iced::Background::Color(WARNING)),
+                            text_color: BG,
                             border: iced::Border {
                                 radius: 3.0.into(),
                                 ..Default::default()
@@ -1331,101 +1228,119 @@ impl App {
                             ..Default::default()
                         }),
                 ]
-                .padding(6),
+                .padding(SPACE_SM as u16),
             )
-            .padding(8)
+            .padding(SPACE_SM as u16)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.99, 0.91, 0.55))),
+                background: Some(iced::Background::Color(WARNING)),
                 border: iced::Border {
                     radius: 6.0.into(),
                     ..Default::default()
                 },
                 ..Default::default()
             })
+            .width(Length::Fixed(420.0))
             .into()
+        } else if let Some(c) = &self.last_coaching {
+            text(c.clone())
+                .size(FONT_BODY)
+                .color(TEXT_SECONDARY)
+                .into()
         } else {
-            // iced 0.13 + cosmic-text panics on size 0; use an empty space instead.
-            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
-        };
-
-        let recap_slot: Element<'_, Message> = if let Some((ref date, ref text_)) = self.recap {
-            let prefix = match self.settings.language {
-                Language::Es => format!("Resumen de {}", date),
-                Language::En => format!("Recap of {}", date),
-            };
-            container(
-                row![
-                    column![
-                        text(prefix)
-                            .size(13)
-                            .color(Color::from_rgb(0.6, 0.75, 0.6)),
-                        text(text_.clone())
-                            .size(14)
-                            .color(Color::from_rgb(0.9, 0.95, 0.9)),
-                    ]
-                    .spacing(4),
-                    iced::widget::horizontal_space(),
-                    button(text("×").size(13))
-                        .on_press(Message::DismissRecap)
-                        .padding([2, 8])
-                        .style(|_, _| button::Style {
-                            background: Some(iced::Background::Color(Color::from_rgb(0.20, 0.30, 0.25))),
-                            text_color: Color::WHITE,
-                            border: iced::Border {
-                                radius: 3.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                ]
-                .padding(8),
-            )
-            .padding(6)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.10, 0.20, 0.14))),
-                border: iced::Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
-        } else {
-            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+            text(self.idle_microcopy())
+                .size(FONT_BODY)
+                .color(TEXT_MUTED)
+                .into()
         };
 
         let content = column![
-            top_bar,
-            recap_slot,
-            toast_slot,
-            text(title).size(40).color(Color::from_rgb(0.92, 0.96, 0.92)),
-            text(status_text)
-                .size(28)
-                .color(Color::from_rgb(0.85, 0.92, 0.85)),
-            bar,
-            text(progress_label)
-                .size(16)
-                .color(Color::from_rgb(0.7, 0.8, 0.7)),
-            coaching_slot,
-            buttons_col,
-            distraction_slot,
-            text("(Click START FOCUS para comenzar una sesión)")
-                .size(14)
-                .color(Color::from_rgb(0.6, 0.6, 0.6)),
+            hero,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_LG as f32)),
+            cta,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_MD as f32)),
+            microcopy,
         ]
-        .spacing(20)
-        .align_x(Horizontal::Center);
+        .spacing(SPACE_MD as u16)
+        .align_x(iced::alignment::Horizontal::Center);
 
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(iced::Background::Color(bg)),
+            .padding(SPACE_XL as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
                 ..Default::default()
             })
             .into()
+    }
+
+    fn state_label(&self) -> String {
+        match (self.pomodoro_engine.state(), self.settings.language) {
+            (SolarFocusCore::AppState::Idle, Language::Es) => "Listo para comenzar".to_string(),
+            (SolarFocusCore::AppState::Idle, Language::En) => "Ready to start".to_string(),
+            (SolarFocusCore::AppState::Focusing(_), Language::Es) if self.pomodoro_engine.is_paused() => "EN PAUSA".to_string(),
+            (SolarFocusCore::AppState::Focusing(_), Language::En) if self.pomodoro_engine.is_paused() => "PAUSED".to_string(),
+            (SolarFocusCore::AppState::Focusing(_), Language::Es) => "EN FOCO".to_string(),
+            (SolarFocusCore::AppState::Focusing(_), Language::En) => "IN FOCUS".to_string(),
+            (SolarFocusCore::AppState::Break, Language::Es) => "DESCANSO".to_string(),
+            (SolarFocusCore::AppState::Break, Language::En) => "BREAK".to_string(),
+            (SolarFocusCore::AppState::Completed, Language::Es) => "COMPLETADO".to_string(),
+            (SolarFocusCore::AppState::Completed, Language::En) => "DONE".to_string(),
+        }
+    }
+
+    fn idle_microcopy(&self) -> &'static str {
+        match (self.pomodoro_engine.state(), self.settings.language) {
+            (SolarFocusCore::AppState::Idle, Language::Es) => "Pomodoro de 25 minutos.",
+            (SolarFocusCore::AppState::Idle, Language::En) => "25-minute pomodoro.",
+            (SolarFocusCore::AppState::Break, Language::Es) => "Tomate un respiro.",
+            (SolarFocusCore::AppState::Break, Language::En) => "Take a breath.",
+            _ => "",
+        }
+    }
+
+    fn cta_button(&self, is_paused: bool) -> Element<'_, Message> {
+        use ui::palette::*;
+        let lang = self.settings.language;
+        let (label, msg, bg) = match (self.pomodoro_engine.state(), is_paused, lang) {
+            (SolarFocusCore::AppState::Idle, _, Language::Es) => ("EMPEZAR ENFOQUE", Message::StartFocus, ACCENT),
+            (SolarFocusCore::AppState::Idle, _, Language::En) => ("START FOCUS", Message::StartFocus, ACCENT),
+            (SolarFocusCore::AppState::Completed, _, Language::Es) => ("EMPEZAR DE NUEVO", Message::StartFocus, ACCENT),
+            (SolarFocusCore::AppState::Completed, _, Language::En) => ("START AGAIN", Message::StartFocus, ACCENT),
+            (SolarFocusCore::AppState::Focusing(_), true, Language::Es) => ("REANUDAR", Message::Resume, ACCENT),
+            (SolarFocusCore::AppState::Focusing(_), true, Language::En) => ("RESUME", Message::Resume, ACCENT),
+            (SolarFocusCore::AppState::Focusing(_), false, Language::Es) => ("PAUSAR", Message::Pause, ACCENT_DIM),
+            (SolarFocusCore::AppState::Focusing(_), false, Language::En) => ("PAUSE", Message::Pause, ACCENT_DIM),
+            (SolarFocusCore::AppState::Break, true, Language::Es) => ("REANUDAR", Message::Resume, ACCENT),
+            (SolarFocusCore::AppState::Break, true, Language::En) => ("RESUME", Message::Resume, ACCENT),
+            (SolarFocusCore::AppState::Break, false, Language::Es) => ("VOLVER AL FOCO", Message::StartFocus, ACCENT),
+            (SolarFocusCore::AppState::Break, false, Language::En) => ("BACK TO FOCUS", Message::StartFocus, ACCENT),
+        };
+        button(
+            text(label)
+                .size(FONT_LEAD)
+                .color(BG),
+        )
+        .on_press(msg)
+        .padding([14, 32])
+        .style(move |_, status| {
+            let bg = match status {
+                button::Status::Hovered => SURFACE_RAISED,
+                _ => bg,
+            };
+            button::Style {
+                background: Some(iced::Background::Color(bg)),
+                text_color: TEXT_PRIMARY,
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .into()
     }
 
     fn view_settings(&self) -> Element<'_, Message> {
@@ -1720,6 +1635,7 @@ fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
     }
 }
 
+#[allow(dead_code)]
 fn primary_button(label: &str, msg: Message) -> Element<'_, Message> {
     button(text(label.to_string()).size(18))
         .on_press(msg)
@@ -1736,6 +1652,7 @@ fn primary_button(label: &str, msg: Message) -> Element<'_, Message> {
         .into()
 }
 
+#[allow(dead_code)]
 fn secondary_button(label: &str, msg: Message) -> Element<'_, Message> {
     button(text(label.to_string()).size(18))
         .on_press(msg)
