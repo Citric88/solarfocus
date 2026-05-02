@@ -102,6 +102,14 @@ pub struct Settings {
     // v1.2 Phase 4 — coarse RAM budget profile.
     #[serde(default)]
     pub ram_mode: RamMode,
+
+    // UI-4 — true on a brand-new install. Wizard sets to false on completion.
+    #[serde(default = "default_first_run")]
+    pub first_run: bool,
+}
+
+fn default_first_run() -> bool {
+    true
 }
 
 fn default_true() -> bool {
@@ -136,6 +144,7 @@ impl Default for Settings {
             user_rules_path: None,
             model_download_skipped: false,
             ram_mode: RamMode::default(),
+            first_run: true,
         }
     }
 }

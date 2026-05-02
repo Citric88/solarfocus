@@ -72,6 +72,12 @@ pub enum Message {
     // UI-1 — route navigation
     SwitchRoute(Route),
 
+    // UI-4 — Setup tabs + first-run wizard
+    SwitchSetupTab(SetupTab),
+    WizardNext,
+    WizardBack,
+    WizardFinish,
+
     // Phase 3.5b — model download flow
     StartModelDownload,
     SkipModelDownload,
@@ -122,6 +128,31 @@ pub struct App {
 
     // UI-1 — current canvas route
     route: Route,
+
+    // UI-4 — Setup tabs + wizard
+    setup_tab: SetupTab,
+    wizard_step: WizardStep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupTab {
+    General,
+    Ai,
+    Privacy,
+    About,
+}
+impl Default for SetupTab {
+    fn default() -> Self {
+        SetupTab::General
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WizardStep {
+    Welcome,
+    Profile,
+    Download,
+    Done,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +236,8 @@ impl App {
                 last_summary_date: today_iso_local(),
                 recap,
                 route: Route::default(),
+                setup_tab: SetupTab::default(),
+                wizard_step: WizardStep::Welcome,
             },
             Task::none(),
         )
@@ -794,6 +827,34 @@ impl App {
                 log::info!("RAM mode → {:?} (applied)", mode);
                 Task::none()
             }
+            Message::SwitchSetupTab(t) => {
+                self.setup_tab = t;
+                Task::none()
+            }
+            Message::WizardNext => {
+                self.wizard_step = match self.wizard_step {
+                    WizardStep::Welcome => WizardStep::Profile,
+                    WizardStep::Profile => WizardStep::Download,
+                    WizardStep::Download | WizardStep::Done => WizardStep::Done,
+                };
+                Task::none()
+            }
+            Message::WizardBack => {
+                self.wizard_step = match self.wizard_step {
+                    WizardStep::Welcome => WizardStep::Welcome,
+                    WizardStep::Profile => WizardStep::Welcome,
+                    WizardStep::Download => WizardStep::Profile,
+                    WizardStep::Done => WizardStep::Done,
+                };
+                Task::none()
+            }
+            Message::WizardFinish => {
+                self.settings.first_run = false;
+                self.settings.save();
+                self.wizard_step = WizardStep::Done;
+                self.route = Route::Focus;
+                Task::none()
+            }
             Message::SwitchRoute(r) => {
                 if r != self.route {
                     log::info!("Route → {:?}", r);
@@ -886,8 +947,11 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        // First-run download still hijacks the whole window — UI-4 will
-        // fold it into a Wizard route. For now, pre-empt the layout.
+        // UI-4: first-run wizard takes the whole window until completed.
+        if self.settings.first_run && self.wizard_step != WizardStep::Done {
+            return self.view_wizard();
+        }
+        // Active model download (when re-triggered from Setup) takes over too.
         if self.download_modal_open {
             return self.view_download_modal();
         }
@@ -899,7 +963,7 @@ impl App {
             Route::Focus => self.view_main(),
             Route::Stats => self.view_stats_placeholder(),
             Route::Coach => self.view_coach_placeholder(),
-            Route::Setup => self.view_settings(),
+            Route::Setup => self.view_setup_tabs(),
         };
 
         iced::widget::row![sidebar, canvas].into()
@@ -1537,8 +1601,542 @@ impl App {
         .into()
     }
 
+    /// UI-4: tabbed Setup canvas. The legacy `view_settings` is kept as
+    /// the AI tab content for now; UI-4 wraps it with tab navigation.
+    fn view_setup_tabs(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+
+        let make_tab = |t: SetupTab, label: &'static str| -> Element<'_, Message> {
+            let selected = t == self.setup_tab;
+            iced::widget::button(
+                text(label.to_string())
+                    .size(FONT_BODY)
+                    .color(if selected { TEXT_PRIMARY } else { TEXT_SECONDARY }),
+            )
+            .on_press(Message::SwitchSetupTab(t))
+            .padding([8, 16])
+            .style(move |_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(if selected {
+                    SURFACE
+                } else {
+                    iced::Color::TRANSPARENT
+                })),
+                text_color: TEXT_PRIMARY,
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        let tab_bar = iced::widget::row![
+            make_tab(SetupTab::General, match self.settings.language {
+                Language::Es => "General",
+                Language::En => "General",
+            }),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            make_tab(SetupTab::Ai, "IA"),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            make_tab(SetupTab::Privacy, match self.settings.language {
+                Language::Es => "Privacidad",
+                Language::En => "Privacy",
+            }),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            make_tab(SetupTab::About, match self.settings.language {
+                Language::Es => "Acerca",
+                Language::En => "About",
+            }),
+        ]
+        .spacing(SPACE_XS as u16);
+
+        let panel: Element<'_, Message> = match self.setup_tab {
+            SetupTab::General => self.view_setup_general(),
+            SetupTab::Ai => self.view_settings(),
+            SetupTab::Privacy => self.view_setup_privacy(),
+            SetupTab::About => self.view_setup_about(),
+        };
+
+        let body = column![
+            text(match self.settings.language {
+                Language::Es => "Ajustes",
+                Language::En => "Setup",
+            })
+            .size(FONT_TITLE)
+            .color(TEXT_PRIMARY),
+            tab_bar,
+            panel,
+        ]
+        .spacing(SPACE_LG as u16)
+        .padding(SPACE_XL as u16)
+        .max_width(720);
+
+        container(iced::widget::scrollable(body))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn view_setup_general(&self) -> Element<'_, Message> {
+        use infra::settings::RamMode;
+        use ui::palette::*;
+        let lang_card = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Idioma",
+                    Language::En => "Language",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                iced::widget::row![
+                    self.lang_button(Language::Es, "Español"),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    self.lang_button(Language::En, "English"),
+                ],
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let ram_card = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Modo de RAM",
+                    Language::En => "RAM mode",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                self.ram_card(
+                    RamMode::Low,
+                    "Low",
+                    "Solo timer · ≤ 50 MB",
+                    "Timer only · ≤ 50 MB",
+                ),
+                self.ram_card(
+                    RamMode::Normal,
+                    "Normal",
+                    "Detección de distracciones · ≤ 120 MB",
+                    "Distraction detection · ≤ 120 MB",
+                ),
+                self.ram_card(
+                    RamMode::Full,
+                    "Full",
+                    "Coaching IA + clasificador · ≤ 1.5 GB",
+                    "AI coaching + classifier · ≤ 1.5 GB",
+                ),
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let shortcuts = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Atajos de teclado",
+                    Language::En => "Keyboard shortcuts",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                text("Space / P · Pausa").size(FONT_SMALL).color(TEXT_PRIMARY),
+                text("R · Reanudar").size(FONT_SMALL).color(TEXT_PRIMARY),
+                text("B · Tomar descanso")
+                    .size(FONT_SMALL)
+                    .color(TEXT_PRIMARY),
+                text("S · Abrir Setup").size(FONT_SMALL).color(TEXT_PRIMARY),
+                text("1 / 2 / 3 / 4 · Cambiar de pestaña")
+                    .size(FONT_SMALL)
+                    .color(TEXT_PRIMARY),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        column![lang_card, ram_card, shortcuts]
+            .spacing(SPACE_MD as u16)
+            .into()
+    }
+
+    fn lang_button(&self, lang: Language, label: &'static str) -> Element<'_, Message> {
+        use ui::palette::*;
+        let selected = self.settings.language == lang;
+        iced::widget::button(text(label.to_string()).size(FONT_BODY).color(BG))
+            .on_press(Message::SetLanguage(lang))
+            .padding([6, 16])
+            .style(move |_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(if selected {
+                    ACCENT
+                } else {
+                    SURFACE_RAISED
+                })),
+                text_color: if selected { BG } else { TEXT_PRIMARY },
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn ram_card(
+        &self,
+        mode: infra::settings::RamMode,
+        title: &'static str,
+        desc_es: &'static str,
+        desc_en: &'static str,
+    ) -> Element<'_, Message> {
+        use ui::palette::*;
+        let selected = self.settings.ram_mode == mode;
+        let desc = if self.settings.language == Language::Es {
+            desc_es
+        } else {
+            desc_en
+        };
+        iced::widget::button(
+            iced::widget::row![
+                column![
+                    text(title.to_string())
+                        .size(FONT_BODY)
+                        .color(TEXT_PRIMARY),
+                    text(desc.to_string())
+                        .size(FONT_SMALL)
+                        .color(TEXT_SECONDARY),
+                ]
+                .spacing(2),
+                iced::widget::horizontal_space(),
+                text(if selected { "●" } else { "○" })
+                    .size(FONT_LEAD)
+                    .color(if selected { ACCENT } else { TEXT_MUTED }),
+            ]
+            .padding(SPACE_SM as u16),
+        )
+        .on_press(Message::SetRamMode(mode))
+        .padding(0)
+        .width(Length::Fill)
+        .style(move |_, _| iced::widget::button::Style {
+            background: Some(iced::Background::Color(if selected {
+                SURFACE_RAISED
+            } else {
+                SURFACE
+            })),
+            text_color: TEXT_PRIMARY,
+            border: iced::Border {
+                color: if selected { ACCENT_DIM } else { iced::Color::TRANSPARENT },
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+    }
+
+    fn view_setup_privacy(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        let copy_es = "SolarFocus procesa todo localmente. Tu actividad no sale del equipo. \
+                       Los modelos IA (cuando se descargan) corren en tu hardware.";
+        let copy_en = "SolarFocus processes everything locally. Your activity never leaves your machine. \
+                       AI models (when downloaded) run on your own hardware.";
+
+        let banner = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "🔒 Privacidad",
+                    Language::En => "🔒 Privacy",
+                })
+                .size(FONT_LEAD)
+                .color(TEXT_PRIMARY),
+                text(if self.settings.language == Language::Es {
+                    copy_es
+                } else {
+                    copy_en
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                color: ACCENT_DIM,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        });
+
+        let perm = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Permiso de Grabación de Pantalla (macOS)",
+                    Language::En => "Screen Recording permission (macOS)",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Sin él, SolarFocus solo ve el nombre del proceso, no el título.",
+                    Language::En =>
+                        "Without it, SolarFocus only sees the process name, not the title.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        column![banner, perm].spacing(SPACE_MD as u16).into()
+    }
+
+    fn view_setup_about(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        column![
+            text("SolarFocus OS").size(FONT_TITLE).color(TEXT_PRIMARY),
+            text("v1.2.0-rc2").size(FONT_BODY).color(TEXT_SECONDARY),
+            text(match self.settings.language {
+                Language::Es =>
+                    "Productividad enfocada con IA local. Privacidad por diseño.",
+                Language::En =>
+                    "Focused productivity with local AI. Privacy by design.",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_SECONDARY),
+            iced::widget::Space::with_height(SPACE_LG as f32),
+            text("Apache-2.0 / MIT").size(FONT_TINY).color(TEXT_MUTED),
+            text("github.com/Citric88/solarfocus")
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+        ]
+        .spacing(SPACE_SM as u16)
+        .into()
+    }
+
+    /// UI-4: First-run wizard. Three pages: Welcome / Profile / Download.
+    fn view_wizard(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+
+        let progress_dot = |active: bool| {
+            text(if active { "●" } else { "○" })
+                .size(FONT_LEAD)
+                .color(if active { ACCENT } else { TEXT_MUTED })
+        };
+        let dots = iced::widget::row![
+            progress_dot(self.wizard_step >= WizardStep::Welcome),
+            iced::widget::Space::with_width(SPACE_SM as f32),
+            progress_dot(self.wizard_step >= WizardStep::Profile),
+            iced::widget::Space::with_width(SPACE_SM as f32),
+            progress_dot(self.wizard_step >= WizardStep::Download),
+        ];
+
+        let body: Element<'_, Message> = match self.wizard_step {
+            WizardStep::Welcome => self.wizard_welcome(),
+            WizardStep::Profile => self.wizard_profile(),
+            WizardStep::Download => self.wizard_download(),
+            WizardStep::Done => iced::widget::Space::with_height(Length::Fixed(0.0)).into(),
+        };
+
+        let nav = iced::widget::row![
+            iced::widget::button(text(match self.settings.language {
+                Language::Es => "Atrás",
+                Language::En => "Back",
+            }))
+            .on_press(Message::WizardBack)
+            .padding([8, 18])
+            .style(|_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                text_color: TEXT_PRIMARY,
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            iced::widget::horizontal_space(),
+            iced::widget::button(text(match (self.wizard_step, self.settings.language) {
+                (WizardStep::Download, Language::Es) => "Empezar",
+                (WizardStep::Download, Language::En) => "Get started",
+                (_, Language::Es) => "Siguiente",
+                (_, Language::En) => "Next",
+            }))
+            .on_press(if self.wizard_step == WizardStep::Download {
+                Message::WizardFinish
+            } else {
+                Message::WizardNext
+            })
+            .padding([8, 22])
+            .style(|_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(ACCENT)),
+                text_color: BG,
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        ];
+
+        container(
+            column![
+                dots,
+                iced::widget::Space::with_height(SPACE_LG as f32),
+                body,
+                iced::widget::Space::with_height(SPACE_XL as f32),
+                nav,
+            ]
+            .padding(SPACE_XL as u16)
+            .spacing(SPACE_MD as u16)
+            .max_width(560),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG)),
+            ..Default::default()
+        })
+        .into()
+    }
+
+    fn wizard_welcome(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        column![
+            text("SolarFocus OS").size(FONT_TITLE).color(TEXT_PRIMARY),
+            text(match self.settings.language {
+                Language::Es =>
+                    "Productividad enfocada con IA local. Tu actividad nunca sale del equipo.",
+                Language::En =>
+                    "Focused productivity with local AI. Your activity never leaves your machine.",
+            })
+            .size(FONT_BODY)
+            .color(TEXT_SECONDARY),
+            iced::widget::Space::with_height(SPACE_MD as f32),
+            text(match self.settings.language {
+                Language::Es => "Idioma",
+                Language::En => "Language",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED),
+            iced::widget::row![
+                self.lang_button(Language::Es, "Español"),
+                iced::widget::Space::with_width(SPACE_SM as f32),
+                self.lang_button(Language::En, "English"),
+            ],
+        ]
+        .spacing(SPACE_SM as u16)
+        .into()
+    }
+
+    fn wizard_profile(&self) -> Element<'_, Message> {
+        use infra::settings::RamMode;
+        use ui::palette::*;
+        column![
+            text(match self.settings.language {
+                Language::Es => "Elige tu perfil de RAM",
+                Language::En => "Pick your RAM profile",
+            })
+            .size(FONT_TITLE)
+            .color(TEXT_PRIMARY),
+            text(match self.settings.language {
+                Language::Es => "Lo puedes cambiar después en Setup → General.",
+                Language::En => "You can change this later in Setup → General.",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_SECONDARY),
+            iced::widget::Space::with_height(SPACE_MD as f32),
+            self.ram_card(
+                RamMode::Low,
+                "Low",
+                "Solo timer · ≤ 50 MB",
+                "Timer only · ≤ 50 MB",
+            ),
+            self.ram_card(
+                RamMode::Normal,
+                "Normal",
+                "Detección de distracciones · ≤ 120 MB",
+                "Distraction detection · ≤ 120 MB",
+            ),
+            self.ram_card(
+                RamMode::Full,
+                "Full",
+                "Coaching IA + clasificador · ≤ 1.5 GB",
+                "AI coaching + classifier · ≤ 1.5 GB",
+            ),
+        ]
+        .spacing(SPACE_SM as u16)
+        .into()
+    }
+
+    fn wizard_download(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        column![
+            text(match self.settings.language {
+                Language::Es => "Descarga del modelo IA",
+                Language::En => "AI model download",
+            })
+            .size(FONT_TITLE)
+            .color(TEXT_PRIMARY),
+            text(match (self.settings.ram_mode, self.settings.language) {
+                (infra::settings::RamMode::Full, Language::Es) =>
+                    "Tu perfil Full descarga ~1 GB de SmolLM2 después del wizard. \
+                     Si prefieres, puedes saltarlo y usar el coach básico.",
+                (infra::settings::RamMode::Full, Language::En) =>
+                    "Your Full profile downloads ~1 GB of SmolLM2 after the wizard. \
+                     You can skip and use the basic coach if you prefer.",
+                (_, Language::Es) =>
+                    "Tu perfil actual no necesita descargar el modelo IA. Listo para empezar.",
+                (_, Language::En) =>
+                    "Your current profile doesn't need the AI model download. Ready to start.",
+            })
+            .size(FONT_BODY)
+            .color(TEXT_SECONDARY),
+        ]
+        .spacing(SPACE_MD as u16)
+        .into()
+    }
+
+    /// Legacy AI-tab content. UI-4 wraps this with view_setup_tabs.
     fn view_settings(&self) -> Element<'_, Message> {
-        let title = text("Ajustes").size(32).color(Color::WHITE);
+        let title = text("Ajustes IA").size(20).color(Color::WHITE);
 
         let ai_toggle = row![
             text(format!("Coaching IA: {}", on_off(self.settings.ai_enabled)))
