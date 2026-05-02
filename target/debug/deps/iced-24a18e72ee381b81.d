@@ -1,0 +1,13 @@
+/Volumes/External Home/jesus/code/solarfocus/target/debug/deps/iced-24a18e72ee381b81.d: /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/lib.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/error.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/program.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/application.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/daemon.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/settings.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/time.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/window.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/window/icon.rs
+
+/Volumes/External Home/jesus/code/solarfocus/target/debug/deps/libiced-24a18e72ee381b81.rmeta: /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/lib.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/error.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/program.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/application.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/daemon.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/settings.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/time.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/window.rs /Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/window/icon.rs
+
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/lib.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/error.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/program.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/application.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/daemon.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/settings.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/time.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/window.rs:
+/Users/jesus/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iced-0.13.1/src/window/icon.rs:

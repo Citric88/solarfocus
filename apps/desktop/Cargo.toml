@@ -2,11 +2,17 @@
 name = "solarfocus-desktop"
 version = "0.1.0"
 edition = "2021"
-authors = ["SolarFocus Team"]
 
 [dependencies]
-iced = { version = "0.13", features = ["tokio"] }
-rand = "0.8"
+iced = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+env_logger = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+log = { workspace = true }
+solar-focus-core = { path = "../../crates/core-domain" }
 
 [[bin]]
 name = "solarfocus-desktop"

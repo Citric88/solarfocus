@@ -28,7 +28,6 @@ impl AppState {
         *self = AppState::Idle;
     }
 
-    // 🔧 CORRECCIÓN: Se eliminó el punto y coma después de gen_bool() para devolver el valor booleano real.
     pub fn mock_check_distraction() -> bool {
         let mut rng = rand::thread_rng();
         rng.gen_bool(0.02) // Sin punto y coma al final, devuelve true/false directamente
