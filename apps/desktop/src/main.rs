@@ -16,7 +16,8 @@ pub use solar_focus_core as SolarFocusCore;
 
 use solar_focus_intelligence::{
     ClassificationLabel, ClassificationResult, Coach, CoachingTrigger, DistractionClassifier,
-    FocusContext, Language, MockClassifier, MockCoach, RulesClassifier,
+    FocusContext, Language, MockClassifier, MockCoach, MockSummarizer, RulesClassifier,
+    Summarizer,
 };
 use solar_focus_core::focus_rules::FocusRulesEngine;
 use std::sync::Arc;
@@ -65,6 +66,10 @@ pub enum Message {
     DownloadPoll,
     DownloadFinished(Result<String, String>), // Ok(path) | Err(message)
     DismissDownloadModal,
+    /// Phase 3.5c — engine ready after async load post-download.
+    LlmEngineLoaded(Result<(), String>),
+    /// Phase 3.5c — manual debug trigger to generate today's recap now.
+    GenerateRecapNow,
 
     // Phase 3.5b — daily summary scheduler
     DailyRollCheck,
@@ -80,6 +85,7 @@ pub struct App {
     // v1.2 fields
     settings: Settings,
     coach: Arc<dyn Coach>,
+    summarizer: Arc<dyn Summarizer>,
     classifier: Arc<dyn DistractionClassifier>,
     last_coaching: Option<String>,
     last_classification: Option<ClassificationResult>,
@@ -128,8 +134,19 @@ impl App {
             }
         };
 
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+
+        // Phase 3.5c — auto-migrate Mock → Rules so the toast classifier
+        // path actually runs for users whose settings.json was written
+        // by alpha (which had Mock as default).
+        if matches!(settings.classifier_mode, ClassifierMode::Mock) {
+            log::info!("Migrating classifier_mode Mock → Rules (one-time)");
+            settings.classifier_mode = ClassifierMode::Rules;
+            settings.save();
+        }
+
         let coach = build_coach(&settings);
+        let summarizer = build_summarizer(&settings);
         let classifier = build_classifier(&settings);
 
         log::info!(
@@ -156,6 +173,7 @@ impl App {
                 last_state_was_completed: false,
                 settings,
                 coach,
+                summarizer,
                 classifier,
                 last_coaching: None,
                 last_classification: None,
@@ -179,6 +197,54 @@ impl App {
     fn rebuild_classifier(&mut self) {
         self.classifier = build_classifier(&self.settings);
         log::info!("Classifier rebuilt: mode={:?}", self.settings.classifier_mode);
+    }
+
+    /// Build the DaySummaryContext for `date` and dispatch it to the
+    /// active Summarizer (real LLM if loaded, MockSummarizer otherwise).
+    fn dispatch_summary_for(&self, date: String) -> Task<Message> {
+        let repo = match self.session_repo.as_ref() {
+            Some(r) => r,
+            None => return Task::none(),
+        };
+        let rows = repo.sessions_for_date(&date).unwrap_or_default();
+        if rows.is_empty() {
+            log::info!("No sessions for {} — skipping summary", date);
+            return Task::none();
+        }
+        let sessions_completed = rows
+            .iter()
+            .filter(|r| r.state == "completed")
+            .count() as u8;
+        let total_focus_secs = rows
+            .iter()
+            .filter(|r| r.state == "completed")
+            .map(|r| r.duration as u32)
+            .sum::<u32>();
+        let ctx = solar_focus_intelligence::DaySummaryContext {
+            date: date.clone(),
+            sessions_completed,
+            total_focus_secs,
+            longest_streak: sessions_completed,
+            level: 1,
+            xp_gained: total_focus_secs / 10,
+            language: self.settings.language,
+        };
+        let fut = self.summarizer.daily_summary(&ctx);
+        let date_for_msg = date.clone();
+        let canned_fallback = solar_focus_intelligence::prompts::summary_canned(&ctx);
+        Task::perform(fut, move |result| match result {
+            Ok(text) => Message::DailySummaryReady {
+                date: date_for_msg.clone(),
+                text,
+            },
+            Err(e) => {
+                log::warn!("Summarizer failed: {e} — using canned fallback");
+                Message::DailySummaryReady {
+                    date: date_for_msg.clone(),
+                    text: canned_fallback.clone(),
+                }
+            }
+        })
     }
 
     #[cfg(feature = "llm")]
@@ -257,6 +323,32 @@ impl App {
     fn spawn_download(&mut self) -> Task<Message> {
         log::warn!("Download requested but binary built without `llm` feature");
         Task::none()
+    }
+
+    #[cfg(feature = "llm")]
+    fn spawn_engine_load(&mut self) -> Task<Message> {
+        use infra::llm::{LlmRuntime, LoadOpts};
+        use infra::model_download::{manifest_for, model_path};
+        let Some(manifest) = manifest_for(self.settings.model_choice) else {
+            return Task::done(Message::LlmEngineLoaded(Err("no manifest".into())));
+        };
+        let path = model_path(manifest);
+        let fut = async move {
+            match LlmRuntime::load(&path, LoadOpts::default()).await {
+                Ok(_) => Ok(()), // We discard the runtime here — build_coach
+                                  // re-loads it. Cheap because mmap'd file is in
+                                  // OS page cache after the first load.
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        Task::perform(fut, Message::LlmEngineLoaded)
+    }
+
+    #[cfg(not(feature = "llm"))]
+    fn spawn_engine_load(&mut self) -> Task<Message> {
+        Task::done(Message::LlmEngineLoaded(Err(
+            "binary built without llm feature".into(),
+        )))
     }
 }
 
@@ -592,11 +684,12 @@ impl App {
                         self.download_error = None;
                         self.toast = Some(Toast {
                             text: match self.settings.language {
-                                Language::Es => "Modelo descargado. Reinicia para activar el coach IA.".to_string(),
-                                Language::En => "Model downloaded. Restart to enable the AI coach.".to_string(),
+                                Language::Es => "Modelo descargado. Cargando coach IA…".to_string(),
+                                Language::En => "Model downloaded. Loading AI coach…".to_string(),
                             },
                             expires_at: Instant::now() + Duration::from_secs(8),
                         });
+                        return self.spawn_engine_load();
                     }
                     Err(e) => {
                         log::error!("Model download failed: {}", e);
@@ -604,6 +697,39 @@ impl App {
                     }
                 }
                 Task::none()
+            }
+            Message::LlmEngineLoaded(result) => {
+                match result {
+                    Ok(()) => {
+                        // Re-resolve coach + summarizer from the now-present model.
+                        self.coach = build_coach(&self.settings);
+                        self.summarizer = build_summarizer(&self.settings);
+                        log::info!(
+                            "Hot-swap complete: coach_ready={}, summarizer_ready={}",
+                            self.coach.is_ready(),
+                            self.summarizer.is_ready()
+                        );
+                        self.toast = Some(Toast {
+                            text: match self.settings.language {
+                                Language::Es => "Coach IA listo".to_string(),
+                                Language::En => "AI coach ready".to_string(),
+                            },
+                            expires_at: Instant::now() + Duration::from_secs(4),
+                        });
+                    }
+                    Err(e) => {
+                        log::warn!("LLM load failed after download: {e}");
+                        self.toast = Some(Toast {
+                            text: format!("LLM load failed: {e}"),
+                            expires_at: Instant::now() + Duration::from_secs(6),
+                        });
+                    }
+                }
+                Task::none()
+            }
+            Message::GenerateRecapNow => {
+                let target = today_iso_local().unwrap_or_else(|| "today".into());
+                self.dispatch_summary_for(target)
             }
             Message::DismissDownloadModal => {
                 self.download_modal_open = false;
@@ -619,7 +745,6 @@ impl App {
                 if last.as_deref() == Some(today.as_str()) {
                     return Task::none();
                 }
-                // First boot of a new day → generate yesterday's summary.
                 self.last_summary_date = Some(today.clone());
 
                 let yesterday = match yesterday_iso_local() {
@@ -627,43 +752,20 @@ impl App {
                     None => return Task::none(),
                 };
 
-                if let Some(repo) = self.session_repo.as_ref() {
-                    let rows = repo.sessions_for_date(&yesterday).unwrap_or_default();
-                    if rows.is_empty() {
-                        log::info!("No sessions for {} — skipping daily summary", yesterday);
-                        return Task::none();
-                    }
-                    let sessions_completed = rows
-                        .iter()
-                        .filter(|r| r.state == "completed")
-                        .count() as u8;
-                    let total_focus_secs = rows
-                        .iter()
-                        .filter(|r| r.state == "completed")
-                        .map(|r| r.duration as u32)
-                        .sum::<u32>();
-                    let ctx = solar_focus_intelligence::DaySummaryContext {
-                        date: yesterday.clone(),
-                        sessions_completed,
-                        total_focus_secs,
-                        longest_streak: sessions_completed,
-                        level: 1,
-                        xp_gained: total_focus_secs / 10,
-                        language: self.settings.language,
-                    };
-                    // Use canned summary in beta — when LlmSummarizer is wired
-                    // (Phase 3.5c) this becomes async.
-                    let text = solar_focus_intelligence::prompts::summary_canned(&ctx);
-                    return Task::done(Message::DailySummaryReady {
-                        date: yesterday,
-                        text,
-                    });
-                }
-                Task::none()
+                self.dispatch_summary_for(yesterday)
             }
             Message::DailySummaryReady { date, text } => {
                 if let Some(repo) = self.session_repo.as_ref() {
-                    let _ = repo.save_summary(&date, &text, "canned-v1");
+                    let model_id = if cfg!(feature = "llm") {
+                        match self.settings.model_choice {
+                            infra::settings::ModelChoice::SmolLM2 => "smollm2-1.7b-instruct-q4_k_m",
+                            infra::settings::ModelChoice::Llama1B => "llama-3.2-1b-instruct-q4_k_m",
+                            infra::settings::ModelChoice::Qwen15 => "qwen2.5-1.5b-instruct-q4_k_m",
+                        }
+                    } else {
+                        "canned-v1"
+                    };
+                    let _ = repo.save_summary(&date, &text, model_id);
                 }
                 self.recap = Some((date, text));
                 Task::none()
@@ -1135,6 +1237,19 @@ impl App {
                 ..Default::default()
             });
 
+        let recap_now = button(text("Generar resumen ahora (debug)").size(13))
+            .on_press(Message::GenerateRecapNow)
+            .padding([6, 14])
+            .style(|_, _| button::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.18, 0.30, 0.24))),
+                text_color: Color::WHITE,
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
         let content = column![
             title,
             ai_toggle,
@@ -1142,6 +1257,7 @@ impl App {
             lang_row,
             classifier_row,
             thresholds,
+            recap_now,
             close,
         ]
         .spacing(12)
@@ -1211,6 +1327,37 @@ fn build_coach(settings: &Settings) -> Arc<dyn Coach> {
     }
 
     Arc::new(MockCoach)
+}
+
+/// Mirror of `build_coach` for the daily-summary tier.
+fn build_summarizer(settings: &Settings) -> Arc<dyn Summarizer> {
+    if !settings.ai_enabled {
+        return Arc::new(MockSummarizer);
+    }
+    #[cfg(feature = "llm")]
+    {
+        use infra::llm::{LlmRuntime, LoadOpts};
+        use infra::llm_coach::LlmSummarizer;
+        use infra::model_download::{manifest_for, model_path, model_present};
+        if let Some(manifest) = manifest_for(settings.model_choice) {
+            if model_present(manifest) {
+                let path = model_path(manifest);
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()
+                    .and_then(|rt| {
+                        rt.block_on(async { LlmRuntime::load(&path, LoadOpts::default()).await })
+                            .ok()
+                    });
+                if let Some(rt) = rt {
+                    log::info!("LlmSummarizer ready");
+                    return Arc::new(LlmSummarizer::new(Arc::new(rt)));
+                }
+            }
+        }
+    }
+    Arc::new(MockSummarizer)
 }
 
 fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
