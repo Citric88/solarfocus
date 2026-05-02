@@ -1148,7 +1148,7 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(680);
 
-        container(iced::widget::scrollable(body))
+        container(body)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -1281,7 +1281,7 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(720);
 
-        container(iced::widget::scrollable(body))
+        container(body)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -1672,7 +1672,7 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(720);
 
-        container(iced::widget::scrollable(body))
+        container(body)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
