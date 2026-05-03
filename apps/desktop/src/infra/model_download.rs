@@ -70,14 +70,40 @@ pub fn model_path(manifest: &ModelManifest) -> PathBuf {
     models_dir().join(manifest.filename)
 }
 
-/// Returns true if the file is on disk AND (SHA matches, or hash is empty placeholder).
+/// PERF-3 — cheap presence check used by App::new and the UI render path.
+/// Verifies the file exists with the expected byte size. **Does NOT** read
+/// the file to compute SHA-256; that would re-hash a 1 GB GGUF on every
+/// launch and stall the app for tens of seconds.
+///
+/// Full SHA verification happens once at download time (see `download_model`)
+/// and on demand via `verify_model_full()`.
 pub fn model_present(manifest: &ModelManifest) -> bool {
+    let path = model_path(manifest);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    // Size mismatch → corrupted/incomplete download. Treat as missing so the
+    // UI offers the Download button.
+    if manifest.size_bytes > 0 && meta.len() != manifest.size_bytes {
+        return false;
+    }
+    true
+}
+
+/// On-demand full SHA-256 verification. Slow (~5-10 s per GB). Use only
+/// when explicitly triggered by the user (e.g., a future "Verify integrity"
+/// button) or after a fresh download.
+#[allow(dead_code)]
+pub fn verify_model_full(manifest: &ModelManifest) -> bool {
     let path = model_path(manifest);
     if !path.exists() {
         return false;
     }
     if manifest.sha256.is_empty() {
-        return true; // placeholder period — accept any non-empty file
+        return true;
     }
     matches!(verify_sha256(&path, manifest.sha256), Ok(true))
 }
