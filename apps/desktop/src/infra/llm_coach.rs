@@ -25,8 +25,10 @@ impl Coach for LlmCoach {
         let runtime = self.runtime.clone();
         let prompt = coaching_llm_prompt(trigger, ctx);
         Box::pin(async move {
+            // BUG-C — give the model enough budget to finish a sentence.
+            // The wrapper's generate() also stops on . ! ? so this is a hard cap, not the typical exit.
             runtime
-                .generate(prompt, 50)
+                .generate(prompt, 80)
                 .await
                 .map(|s| s.trim().to_string())
                 .map_err(|e| AiError::Inference(e.to_string()))

@@ -151,6 +151,13 @@ pub struct App {
     /// future polls this between chunks and bails when set.
     download_cancel: Arc<AtomicBool>,
 
+    /// BUG-B — cached `model_present()` per ModelChoice + `feedback_counts()`.
+    /// Reading the filesystem and querying SQLite on every render makes
+    /// the AI tab visibly laggy. We refresh on Setup-tab open and after
+    /// download/delete completion only.
+    model_present_cache: Option<bool>,
+    feedback_counts_cache: (u32, u32),
+
     // Phase 3.5b — daily summary scheduler
     last_summary_date: Option<String>, // ISO YYYY-MM-DD of the last day we summarized
     recap: Option<(String, String)>,   // (date, text) — shown as a card if Some
@@ -283,6 +290,23 @@ impl App {
         // resets this counter; documented behavior for v1.2.0.
         let distractions_today = 0;
 
+        // BUG-B: pre-compute cache values before moving session_repo into Self.
+        let model_present_cache: Option<bool> = {
+            #[cfg(feature = "llm")]
+            {
+                use infra::model_download::{manifest_for, model_present};
+                manifest_for(settings.model_choice).map(model_present)
+            }
+            #[cfg(not(feature = "llm"))]
+            {
+                Some(false)
+            }
+        };
+        let feedback_counts_cache: (u32, u32) = session_repo
+            .as_ref()
+            .and_then(|r| r.feedback_counts().ok())
+            .unwrap_or((0, 0));
+
         (
             Self {
                 pomodoro_engine: engine,
@@ -307,6 +331,8 @@ impl App {
                 download_progress: Arc::new(StdMutex::new(None)),
                 download_error: None,
                 download_cancel: Arc::new(AtomicBool::new(false)),
+                model_present_cache,
+                feedback_counts_cache,
                 last_summary_date,
                 recap,
                 route: Route::default(),
@@ -320,6 +346,23 @@ impl App {
     fn rebuild_classifier(&mut self) {
         self.classifier = build_classifier(&self.settings);
         log::info!("Classifier rebuilt: mode={:?}", self.settings.classifier_mode);
+    }
+
+    /// BUG-B — refresh the cached probes used by Setup → AI panel.
+    /// Cheap when called once per route switch / download finish.
+    fn refresh_setup_caches(&mut self) {
+        #[cfg(feature = "llm")]
+        {
+            use infra::model_download::{manifest_for, model_present};
+            self.model_present_cache = manifest_for(self.settings.model_choice).map(model_present);
+        }
+        #[cfg(not(feature = "llm"))]
+        {
+            self.model_present_cache = Some(false);
+        }
+        if let Some(repo) = self.session_repo.as_ref() {
+            self.feedback_counts_cache = repo.feedback_counts().unwrap_or((0, 0));
+        }
     }
 
     /// Build the DaySummaryContext for `date` and dispatch it to the
@@ -741,7 +784,7 @@ impl App {
             Message::CoachingReady(s) => {
                 if !s.is_empty() {
                     log::info!("Coach: {}", s);
-                    self.last_coaching = Some(s);
+                    self.last_coaching = Some(sanitize_for_display(&s));
                 }
                 Task::none()
             }
@@ -810,6 +853,7 @@ impl App {
                     Ok(p) => {
                         log::info!("Model downloaded: {}", p);
                         self.download_error = None;
+                        self.refresh_setup_caches();
                         self.toast = Some(Toast {
                             text: match self.settings.language {
                                 Language::Es => "Modelo descargado. Cargando coach IA…".to_string(),
@@ -921,6 +965,7 @@ impl App {
             }
             Message::SwitchSetupTab(t) => {
                 self.setup_tab = t;
+                self.refresh_setup_caches();
                 Task::none()
             }
             Message::WizardNext => {
@@ -986,6 +1031,10 @@ impl App {
                     if self.route != Route::Setup {
                         self.settings_open = false;
                     }
+                    // BUG-B: refresh caches when entering Setup or Stats.
+                    if matches!(self.route, Route::Setup | Route::Stats) {
+                        self.refresh_setup_caches();
+                    }
                     // WIRE-2: re-probe permission when switching to a route
                     // that surfaces it.
                     if matches!(self.route, Route::Stats | Route::Setup) {
@@ -1050,6 +1099,7 @@ impl App {
                 Task::none()
             }
             Message::ThumbsUp | Message::ThumbsDown => {
+                // After persisting we'll refresh the cache so AI tab counts stay current.
                 let rating = if matches!(message, Message::ThumbsUp) { 1 } else { -1 };
                 let trigger = "session"; // generic — could differentiate per CoachingTrigger later
                 let msg_text = self.last_coaching.clone().unwrap_or_default();
@@ -1070,6 +1120,7 @@ impl App {
                         log::warn!("save_feedback failed: {e}");
                     }
                 }
+                self.refresh_setup_caches();
                 self.toast = Some(Toast {
                     text: match (rating, self.settings.language) {
                         (1, Language::Es) => "Gracias 👍".to_string(),
@@ -1139,6 +1190,7 @@ impl App {
                                 log::info!("Deleted model file: {}", p.display());
                                 self.coach = build_coach(&self.settings);
                                 self.summarizer = build_summarizer(&self.settings);
+                                self.refresh_setup_caches();
                                 self.toast = Some(Toast {
                                     text: match self.settings.language {
                                         Language::Es => "Modelo eliminado.".to_string(),
@@ -1176,6 +1228,7 @@ impl App {
                 self.dispatch_summary_for(yesterday)
             }
             Message::DailySummaryReady { date, text } => {
+                let text = sanitize_for_display(&text);
                 if let Some(repo) = self.session_repo.as_ref() {
                     let model_id = if cfg!(feature = "llm") {
                         match self.settings.model_choice {
@@ -1252,11 +1305,8 @@ impl App {
     fn view_stats_placeholder(&self) -> Element<'_, Message> {
         use ui::palette::*;
 
-        let (up, down) = self
-            .session_repo
-            .as_ref()
-            .and_then(|r| r.feedback_counts().ok())
-            .unwrap_or((0, 0));
+        // BUG-B: use cached counts.
+        let (up, down) = self.feedback_counts_cache;
         let week = self
             .session_repo
             .as_ref()
@@ -2694,8 +2744,8 @@ impl App {
                 }
             }
 
-            // 2) Model already on disk.
-            if model_present(manifest) {
+            // 2) Model already on disk (BUG-B: use cached probe).
+            if self.model_present_cache.unwrap_or_else(|| model_present(manifest)) {
                 return container(
                     iced::widget::row![
                         column![
@@ -3081,6 +3131,32 @@ fn wipe_all_local_data() -> u32 {
         try_remove(d.data_dir().join("models"));
     }
     n
+}
+
+/// BUG-A — Strip codepoints that cosmic-text's default font can't render
+/// (emojis, exotic symbols, BOMs). Keeps Latin-1 + accented Spanish
+/// characters intact. Also collapses any double whitespace from the
+/// removals.
+fn sanitize_for_display(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let keep = match c as u32 {
+            // Basic Latin + Latin-1 Supplement (covers ¡¿áéíóúñü etc).
+            0x0009 | 0x000A => true,           // tab, newline
+            0x0020..=0x007E => true,           // printable ASCII
+            0x00A0..=0x00FF => true,           // Latin-1 supplement (¡¿ñ accents)
+            0x0100..=0x017F => true,           // Latin Extended-A
+            0x2010..=0x2027 => true,           // common punctuation (— – ‘ ’ “ ” …)
+            0x2030..=0x203F => true,           // ‰ ‹ › etc
+            _ => false,
+        };
+        if keep {
+            out.push(c);
+        } else if !out.ends_with(' ') {
+            out.push(' ');
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// ENH-6 — heuristic hardware recommendation.

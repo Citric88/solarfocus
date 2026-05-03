@@ -191,10 +191,16 @@ fn generate_blocking(
         let piece = String::from_utf8_lossy(&bytes).to_string();
         out.push_str(&piece);
 
-        // Stop on natural sentence end if we're past 1 sentence — coaching
-        // messages should be short.
-        if out.len() > 30 && (piece.contains('\n') || piece.contains("</s>")) {
-            break;
+        // BUG-C — stop on natural sentence end so coaching messages
+        // never get cut mid-word. Wait until at least one sentence has
+        // formed (out.len() > 30 chars), then break on . ! ? \n.
+        if out.len() > 30 {
+            let trimmed = out.trim_end();
+            let last = trimmed.chars().last();
+            let ended_with_terminator = matches!(last, Some('.') | Some('!') | Some('?') | Some('。'));
+            if ended_with_terminator || piece.contains('\n') || piece.contains("</s>") {
+                break;
+            }
         }
 
         // Feed token back for next step.
