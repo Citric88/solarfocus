@@ -92,8 +92,12 @@ pub enum Message {
     SkipModelDownload,
     DownloadPoll,
     DownloadFinished(Result<String, String>), // Ok(path) | Err(message)
-    /// Phase 3.5c — engine ready after async load post-download.
-    LlmEngineLoaded(Result<(), String>),
+    /// PERF-1 — kick off the background LLM load (boot-time + post-download).
+    SpawnEngineLoad,
+    /// Phase 3.5c + PERF-1 — engine ready after async load. Carries the
+    /// loaded runtime so the handler can hot-swap it into App.coach +
+    /// App.summarizer without re-loading.
+    LlmEngineLoaded(Result<LoadedEngines, String>),
     /// Phase 3.5c — manual debug trigger to generate today's recap now.
     GenerateRecapNow,
     /// WIRE-1 — delete the model file currently selected.
@@ -203,6 +207,24 @@ pub struct DownloadSnapshot {
 struct Toast {
     text: String,
     expires_at: Instant,
+}
+
+/// PERF-1 — payload for `LlmEngineLoaded` carrying the freshly-loaded
+/// LlmRuntime. Wrapped in Arc so the Message can be Clone (iced requires).
+/// On non-llm builds this is a unit-like marker.
+#[cfg(feature = "llm")]
+#[derive(Clone)]
+pub struct LoadedEngines(pub std::sync::Arc<infra::llm::LlmRuntime>);
+
+#[cfg(not(feature = "llm"))]
+#[derive(Clone, Debug)]
+pub struct LoadedEngines;
+
+#[cfg(feature = "llm")]
+impl std::fmt::Debug for LoadedEngines {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LoadedEngines(<runtime>)")
+    }
 }
 
 /// Result of probing the foreground-window API. Drives the Privacy / Stats
@@ -339,7 +361,16 @@ impl App {
                 setup_tab: SetupTab::default(),
                 wizard_step: WizardStep::Welcome,
             },
-            Task::done(Message::ProbePermission),
+            // PERF-1: probe permission AND kick off the background LLM load
+            // (latter is a no-op if no model file present or feature off).
+            // Both tasks run in parallel; window paints immediately.
+            {
+                let mut tasks = vec![Task::done(Message::ProbePermission)];
+                if should_attempt_llm_load(&Settings::load()) {
+                    tasks.push(Task::done(Message::SpawnEngineLoad));
+                }
+                Task::batch(tasks)
+            },
         )
     }
 
@@ -504,9 +535,9 @@ impl App {
         let path = model_path(manifest);
         let fut = async move {
             match LlmRuntime::load(&path, LoadOpts::default()).await {
-                Ok(_) => Ok(()), // We discard the runtime here — build_coach
-                                  // re-loads it. Cheap because mmap'd file is in
-                                  // OS page cache after the first load.
+                // PERF-1: keep the runtime alive in the Message; the handler
+                // wraps it in LlmCoach + LlmSummarizer and stores both.
+                Ok(rt) => Ok(LoadedEngines(std::sync::Arc::new(rt))),
                 Err(e) => Err(e.to_string()),
             }
         };
@@ -883,27 +914,42 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SpawnEngineLoad => {
+                log::info!("Spawning background LLM load…");
+                self.toast = Some(Toast {
+                    text: match self.settings.language {
+                        Language::Es => "Cargando coach IA…".to_string(),
+                        Language::En => "Loading AI coach…".to_string(),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(20),
+                });
+                self.spawn_engine_load()
+            }
             Message::LlmEngineLoaded(result) => {
                 match result {
-                    Ok(()) => {
-                        // Re-resolve coach + summarizer from the now-present model.
-                        self.coach = build_coach(&self.settings);
-                        self.summarizer = build_summarizer(&self.settings);
-                        log::info!(
-                            "Hot-swap complete: coach_ready={}, summarizer_ready={}",
-                            self.coach.is_ready(),
-                            self.summarizer.is_ready()
-                        );
-                        self.toast = Some(Toast {
-                            text: match self.settings.language {
-                                Language::Es => "Coach IA listo".to_string(),
-                                Language::En => "AI coach ready".to_string(),
-                            },
-                            expires_at: Instant::now() + Duration::from_secs(4),
-                        });
+                    Ok(_loaded) => {
+                        #[cfg(feature = "llm")]
+                        {
+                            use infra::llm_coach::{LlmCoach, LlmSummarizer};
+                            let runtime = _loaded.0;
+                            self.coach = Arc::new(LlmCoach::new(runtime.clone()));
+                            self.summarizer = Arc::new(LlmSummarizer::new(runtime));
+                            log::info!(
+                                "Hot-swap complete: coach_ready={}, summarizer_ready={}",
+                                self.coach.is_ready(),
+                                self.summarizer.is_ready()
+                            );
+                            self.toast = Some(Toast {
+                                text: match self.settings.language {
+                                    Language::Es => "Coach IA listo".to_string(),
+                                    Language::En => "AI coach ready".to_string(),
+                                },
+                                expires_at: Instant::now() + Duration::from_secs(4),
+                            });
+                        }
                     }
                     Err(e) => {
-                        log::warn!("LLM load failed after download: {e}");
+                        log::warn!("LLM load failed: {e}");
                         self.toast = Some(Toast {
                             text: format!("LLM load failed: {e}"),
                             expires_at: Instant::now() + Duration::from_secs(6),
@@ -3230,78 +3276,45 @@ fn ghost_button(label: &str, msg: Message) -> Element<'_, Message> {
         .into()
 }
 
-/// Select the active Coach based on settings + compile-time `llm` feature
-/// + whether a model file is on disk. Falls back to MockCoach gracefully.
+/// Select the active Coach based on settings + compile-time `llm` feature.
+///
+/// PERF-1: returns MockCoach immediately. If the LLM feature is on AND
+/// the model file is present, the App will dispatch a background
+/// spawn_engine_load() that hot-swaps a real LlmCoach in once the
+/// runtime is loaded. This keeps App::new fast (window paints in <1s
+/// instead of 3-5s).
+///
+/// `loaded_runtime` is the optional already-loaded runtime from a recent
+/// spawn_engine_load — passed in to avoid loading twice.
 fn build_coach(settings: &Settings) -> Arc<dyn Coach> {
     if !settings.ai_enabled {
-        log::info!("AI disabled in settings → using MockCoach");
+        log::info!("AI disabled → using MockCoach");
         return Arc::new(MockCoach);
     }
-
-    #[cfg(feature = "llm")]
-    {
-        use infra::llm::{LlmRuntime, LoadOpts};
-        use infra::llm_coach::LlmCoach;
-        use infra::model_download::{manifest_for, model_path, model_present};
-
-        if let Some(manifest) = manifest_for(settings.model_choice) {
-            if model_present(manifest) {
-                let path = model_path(manifest);
-                log::info!("Loading LLM from {} (this may take a few seconds)", path.display());
-                // Block on load. Done at startup, so OK.
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .ok()
-                    .and_then(|rt| {
-                        rt.block_on(async { LlmRuntime::load(&path, LoadOpts::default()).await }).ok()
-                    });
-                if let Some(rt) = rt {
-                    log::info!("LLM ready — using LlmCoach");
-                    return Arc::new(LlmCoach::new(Arc::new(rt)));
-                }
-                log::warn!("LLM failed to load — falling back to MockCoach");
-            } else {
-                log::info!(
-                    "Model file {} not present — falling back to MockCoach (run downloader first)",
-                    manifest.filename
-                );
-            }
-        }
-    }
-
     Arc::new(MockCoach)
 }
 
-/// Mirror of `build_coach` for the daily-summary tier.
+/// Same deferred semantics as `build_coach` — see PERF-1 docs above.
 fn build_summarizer(settings: &Settings) -> Arc<dyn Summarizer> {
     if !settings.ai_enabled {
         return Arc::new(MockSummarizer);
     }
+    Arc::new(MockSummarizer)
+}
+
+/// PERF-1: returns true if we should bother hot-loading a real LLM at boot.
+fn should_attempt_llm_load(settings: &Settings) -> bool {
+    if !settings.ai_enabled {
+        return false;
+    }
     #[cfg(feature = "llm")]
     {
-        use infra::llm::{LlmRuntime, LoadOpts};
-        use infra::llm_coach::LlmSummarizer;
-        use infra::model_download::{manifest_for, model_path, model_present};
-        if let Some(manifest) = manifest_for(settings.model_choice) {
-            if model_present(manifest) {
-                let path = model_path(manifest);
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .ok()
-                    .and_then(|rt| {
-                        rt.block_on(async { LlmRuntime::load(&path, LoadOpts::default()).await })
-                            .ok()
-                    });
-                if let Some(rt) = rt {
-                    log::info!("LlmSummarizer ready");
-                    return Arc::new(LlmSummarizer::new(Arc::new(rt)));
-                }
-            }
+        use infra::model_download::{manifest_for, model_present};
+        if let Some(m) = manifest_for(settings.model_choice) {
+            return model_present(m);
         }
     }
-    Arc::new(MockSummarizer)
+    false
 }
 
 fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
