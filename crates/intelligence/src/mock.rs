@@ -1,7 +1,7 @@
 //! Phase 1 stand-in implementations. Wire-compatible with the real LLM/classifier
 //! that arrive in Phases 3 and 4.
 
-use crate::prompts::{coaching_canned, summary_canned};
+use crate::prompts::{coaching_curated, summary_canned};
 use crate::traits::*;
 use crate::types::*;
 
@@ -9,7 +9,8 @@ pub struct MockCoach;
 
 impl Coach for MockCoach {
     fn coaching_message(&self, trigger: CoachingTrigger, ctx: &FocusContext) -> AiFuture<String> {
-        let s = coaching_canned(trigger, ctx);
+        // FIX-COACH — curated bank, varied + grammatically correct, no LLM dependency.
+        let s = coaching_curated(trigger, ctx);
         Box::pin(async move { Ok(s) })
     }
     fn is_ready(&self) -> bool {
@@ -70,7 +71,15 @@ mod tests {
         let coach = MockCoach;
         let ctx = FocusContext::empty(Language::Es, 1500);
         let msg = block_on(coach.coaching_message(CoachingTrigger::SessionStart, &ctx)).unwrap();
-        assert!(msg.contains("25 minutos"), "got: {}", msg);
+        // After FIX-COACH, the message comes from the curated bank — no
+        // longer mentions duration verbatim. Just assert non-empty Spanish.
+        assert!(!msg.is_empty(), "expected non-empty curated message");
+        assert!(msg.len() > 8, "message too short: {}", msg);
+        // Sanity: should not contain the broken phrases that surfaced in live testing.
+        let lower = msg.to_lowercase();
+        for bad in ["te has felicitado", "estoy feliz", "querido estudiante"] {
+            assert!(!lower.contains(bad), "curated string contains bad phrase '{}': {}", bad, msg);
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! `Coach` and `Summarizer` impls backed by the local LLM.
 
 use crate::infra::llm::LlmRuntime;
-use solar_focus_intelligence::prompts::{coaching_llm_prompt, summary_canned};
+use solar_focus_intelligence::prompts::{coaching_curated, coaching_llm_prompt, looks_coherent, summary_canned};
 use solar_focus_intelligence::*;
 use std::sync::Arc;
 
@@ -24,14 +24,28 @@ impl Coach for LlmCoach {
     ) -> AiFuture<String> {
         let runtime = self.runtime.clone();
         let prompt = coaching_llm_prompt(trigger, ctx);
+        let lang = ctx.language;
+        let curated_fallback = coaching_curated(trigger, ctx);
         Box::pin(async move {
-            // BUG-C — give the model enough budget to finish a sentence.
-            // The wrapper's generate() also stops on . ! ? so this is a hard cap, not the typical exit.
-            runtime
-                .generate(prompt, 80)
-                .await
-                .map(|s| s.trim().to_string())
-                .map_err(|e| AiError::Inference(e.to_string()))
+            // FIX-COACH — try the LLM, but if the output is incoherent
+            // (echoes prompt scaffolding, wrong language, garbled, too short/long)
+            // fall back to the curated message. SmolLM2-1.7B is too small to
+            // be reliable; the curated bank guarantees baseline quality.
+            match runtime.generate(prompt, 80).await {
+                Ok(raw) => {
+                    let trimmed = raw.trim().to_string();
+                    if looks_coherent(&trimmed, lang) {
+                        Ok(trimmed)
+                    } else {
+                        log::warn!("LLM output rejected (incoherent): {trimmed}");
+                        Ok(curated_fallback)
+                    }
+                }
+                Err(e) => {
+                    log::warn!("LLM error: {e}; using curated fallback");
+                    Ok(curated_fallback)
+                }
+            }
         })
     }
     fn is_ready(&self) -> bool {

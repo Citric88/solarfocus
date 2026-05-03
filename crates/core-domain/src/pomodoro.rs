@@ -210,6 +210,16 @@ impl PomodoroEngine {
     pub fn sessions_completed(&self) -> u8 {
         self.sessions_completed
     }
+
+    /// FEAT-STOP — abort whatever session/break is running and return to Idle.
+    /// Does NOT increment sessions_completed (this is a cancel, not a finish).
+    /// The user can immediately start a fresh session afterwards.
+    pub fn reset(&mut self) {
+        self.session = PomodoroSession::new(self.config.focus_duration);
+        self.current_total = self.config.focus_duration;
+        self.paused = false;
+        self.engine_state = EngineState::Idle;
+    }
 }
 
 impl Default for PomodoroEngine {

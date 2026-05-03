@@ -43,6 +43,7 @@ pub enum Message {
     Pause,
     Resume,
     TakeBreak,
+    EndSession,
     TimerTick(f32),
     SessionCompleted,
 
@@ -657,6 +658,7 @@ impl App {
             use iced::keyboard::key::{Key, Named};
             match key.as_ref() {
                 Key::Named(Named::Space) => Some(Message::Pause),
+                Key::Named(Named::Escape) => Some(Message::EndSession),
                 Key::Character("r") | Key::Character("R") => Some(Message::Resume),
                 Key::Character("p") | Key::Character("P") => Some(Message::Pause),
                 Key::Character("b") | Key::Character("B") => Some(Message::TakeBreak),
@@ -709,6 +711,20 @@ impl App {
             Message::Resume => {
                 self.pomodoro_engine.resume();
                 log::info!("Sesión reanudada");
+                Task::none()
+            }
+            Message::EndSession => {
+                log::info!("Sesión terminada por el usuario");
+                self.pomodoro_engine.reset();
+                self.last_state_was_completed = false;
+                self.session_started_at = None;
+                self.toast = Some(Toast {
+                    text: match self.settings.language {
+                        Language::Es => "Sesión terminada.".to_string(),
+                        Language::En => "Session ended.".to_string(),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(2),
+                });
                 Task::none()
             }
             Message::TakeBreak => {
@@ -1902,17 +1918,25 @@ impl App {
 
         let body = column![title, pitch, status, features, shortcuts]
             .spacing(SPACE_LG as u16)
-            .padding(SPACE_XL as u16)
-            .max_width(720);
+            .max_width(640);
 
-        container(body)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG)),
-                ..Default::default()
-            })
-            .into()
+        // FIX-HELP — wrap in a centered container so it doesn't bleed
+        // edge-to-edge. The outer container handles BG; an inner padded
+        // container constrains the body and centers it horizontally.
+        container(
+            container(body)
+                .padding(SPACE_XL as u16)
+                .max_width(680),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .padding([SPACE_LG as u16, SPACE_XL as u16])
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG)),
+            ..Default::default()
+        })
+        .into()
     }
 
     fn view_coach_placeholder(&self) -> Element<'_, Message> {
@@ -2146,12 +2170,55 @@ impl App {
                 .into()
         };
 
+        // FEAT-STOP — "Terminar sesión" link only when a session is active
+        // (Focusing or Break). Returns the engine to Idle without writing
+        // a completed-session row.
+        let end_link: Element<'_, Message> = if matches!(
+            self.pomodoro_engine.state(),
+            SolarFocusCore::AppState::Focusing(_) | SolarFocusCore::AppState::Break
+        ) {
+            button(
+                text(match self.settings.language {
+                    Language::Es => "Terminar sesión",
+                    Language::En => "End session",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+            )
+            .on_press(Message::EndSession)
+            .padding([4, 12])
+            .style(|_, status| match status {
+                button::Status::Hovered => button::Style {
+                    background: Some(iced::Background::Color(SURFACE_RAISED)),
+                    text_color: TEXT_PRIMARY,
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                _ => button::Style {
+                    background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+                    text_color: TEXT_MUTED,
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            })
+            .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         let content = column![
             hero,
             iced::widget::Space::with_height(Length::Fixed(SPACE_LG as f32)),
             cta,
             iced::widget::Space::with_height(Length::Fixed(SPACE_MD as f32)),
             microcopy,
+            end_link,
         ]
         .spacing(SPACE_MD as u16)
         .align_x(iced::alignment::Horizontal::Center);
