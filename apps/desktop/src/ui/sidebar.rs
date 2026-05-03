@@ -179,9 +179,9 @@ pub enum IconGlyph {
     Help,   // circle with "?" inside
 }
 
-struct IconCanvas {
-    glyph: IconGlyph,
-    selected: bool,
+pub struct IconCanvas {
+    pub glyph: IconGlyph,
+    pub selected: bool,
 }
 
 impl<Msg> canvas::Program<Msg> for IconCanvas {

@@ -91,6 +91,13 @@ impl SessionRepository {
         Ok(self.conn.last_insert_rowid() as u64)
     }
 
+    /// FIX-4 (rc14) — Wipe all coaching_feedback rows. Called from the
+    /// Coach canvas "Limpiar historial" button. Returns the number of rows
+    /// removed.
+    pub fn clear_feedback(&self) -> SqlResult<usize> {
+        self.conn.execute("DELETE FROM coaching_feedback", [])
+    }
+
     pub fn feedback_counts(&self) -> SqlResult<(u32, u32)> {
         let up: u32 = self.conn.query_row(
             "SELECT COUNT(*) FROM coaching_feedback WHERE rating > 0",
@@ -378,5 +385,22 @@ mod tests {
 
         let result = repo.save_session(&invalid_record);
         assert!(result.is_ok(), "Phase 1: no strict validation yet (TODO phase 2)");
+    }
+
+    /// FIX-4 (rc14) — clear_feedback empties the table and zeroes the counts.
+    #[test]
+    fn clear_feedback_empties_table() {
+        let repo = fresh_repo();
+        repo.save_feedback("session", "Útil msg", 1, "smollm2").unwrap();
+        repo.save_feedback("session", "Mal msg", -1, "smollm2").unwrap();
+        let (up, down) = repo.feedback_counts().unwrap();
+        assert_eq!((up, down), (1, 1));
+
+        let removed = repo.clear_feedback().unwrap();
+        assert_eq!(removed, 2);
+
+        let (up_after, down_after) = repo.feedback_counts().unwrap();
+        assert_eq!((up_after, down_after), (0, 0));
+        assert!(repo.recent_feedback(10).unwrap().is_empty());
     }
 }

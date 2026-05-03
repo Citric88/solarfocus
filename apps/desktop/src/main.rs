@@ -8,7 +8,7 @@
 //! - NEW: Window watcher polled every N seconds during focus sessions.
 //! - NEW: User settings persisted to JSON.
 
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, text};
 use iced::{Color, Element, Length, Subscription, Task, window};
 
 pub use solar_focus_core as SolarFocusCore;
@@ -80,6 +80,10 @@ pub enum Message {
     WizardNext,
     WizardBack,
     WizardFinish,
+    /// FIX-3 (rc14) — flip the AI-tab advanced section.
+    ToggleSetupAdvanced,
+    /// FIX-4 (rc14) — wipe all coaching_feedback rows.
+    ClearFeedbackHistory,
 
     // WIRE-2 — runtime permission probe
     ProbePermission,
@@ -176,6 +180,10 @@ pub struct App {
     // UI-4 — Setup tabs + wizard
     setup_tab: SetupTab,
     wizard_step: WizardStep,
+
+    // FIX-3 (rc14) — show advanced (debug) controls in AI tab.
+    // Ephemeral; not persisted.
+    setup_show_advanced: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +377,7 @@ impl App {
                 route: Route::default(),
                 setup_tab: SetupTab::default(),
                 wizard_step: WizardStep::Welcome,
+                setup_show_advanced: false,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).
@@ -1099,6 +1108,27 @@ impl App {
                 self.refresh_setup_caches();
                 Task::none()
             }
+            Message::ToggleSetupAdvanced => {
+                self.setup_show_advanced = !self.setup_show_advanced;
+                Task::none()
+            }
+            Message::ClearFeedbackHistory => {
+                let removed = self
+                    .session_repo
+                    .as_ref()
+                    .and_then(|r| r.clear_feedback().ok())
+                    .unwrap_or(0);
+                log::info!("Cleared {} coaching_feedback rows", removed);
+                self.refresh_setup_caches();
+                self.toast = Some(Toast {
+                    text: match self.settings.language {
+                        Language::Es => format!("Historial limpiado ({}).", removed),
+                        Language::En => format!("History cleared ({}).", removed),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(3),
+                });
+                Task::none()
+            }
             Message::WizardNext => {
                 self.wizard_step = match self.wizard_step {
                     WizardStep::Welcome => WizardStep::Profile,
@@ -1811,15 +1841,79 @@ impl App {
         .size(FONT_BODY)
         .color(TEXT_SECONDARY);
 
-        let feature = |num: &'static str, title_str: String, desc_str: String| -> Element<'_, Message> {
+        // FIX-2 (rc14) — Privacy hero callout: differentiator above the pitch.
+        let privacy_hero = container(
+            column![
+                text(match lang {
+                    Language::Es => "Privacidad por diseño",
+                    Language::En => "Privacy by design",
+                })
+                .size(FONT_LEAD)
+                .color(TEXT_PRIMARY),
+                text(match lang {
+                    Language::Es => "Sin nube · Sin telemetría · Sin cuenta",
+                    Language::En => "No cloud · No telemetry · No account",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE_RAISED)),
+            border: iced::Border {
+                color: ACCENT_DIM,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        });
+
+        // FIX-2 (rc14) — Hero CTA jumps to Focus tab.
+        let cta_label = match lang {
+            Language::Es => "Empezar",
+            Language::En => "Get started",
+        };
+        let cta = iced::widget::button(text(cta_label.to_string()).size(FONT_BODY).color(BG))
+            .on_press(Message::SwitchRoute(Route::Focus))
+            .padding([12, 32])
+            .style(|_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(ACCENT)),
+                text_color: BG,
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let cta_row: Element<'_, Message> = iced::widget::row![
+            iced::widget::horizontal_space(),
+            cta,
+            iced::widget::horizontal_space(),
+        ]
+        .into();
+
+        // FIX-2 (rc14) — Feature cards with drawn icons (no emoji).
+        let feature = |num: &'static str,
+                        glyph: ui::sidebar::IconGlyph,
+                        title_str: String,
+                        desc_str: String|
+         -> Element<'_, Message> {
             container(
                 iced::widget::row![
-                    text(num.to_string())
-                        .size(FONT_LEAD)
-                        .color(ACCENT),
+                    iced::widget::Canvas::new(ui::sidebar::IconCanvas { glyph, selected: true })
+                        .width(Length::Fixed(28.0))
+                        .height(Length::Fixed(28.0)),
                     iced::widget::Space::with_width(SPACE_MD as f32),
                     column![
-                        text(title_str).size(FONT_BODY).color(TEXT_PRIMARY),
+                        iced::widget::row![
+                            text(num.to_string())
+                                .size(FONT_TINY)
+                                .color(TEXT_MUTED),
+                            iced::widget::Space::with_width(SPACE_XS as f32),
+                            text(title_str).size(FONT_BODY).color(TEXT_PRIMARY),
+                        ],
                         text(desc_str).size(FONT_SMALL).color(TEXT_SECONDARY),
                     ]
                     .spacing(2),
@@ -1843,19 +1937,24 @@ impl App {
         };
 
         let features = column![
-            feature("1.", pick("Cronómetro Pomodoro", "Pomodoro timer"),
+            feature("1", ui::sidebar::IconGlyph::Focus,
+                pick("Cronómetro Pomodoro", "Pomodoro timer"),
                 pick("Sesiones de foco + pausas configurables (Setup → General).",
                      "Configurable focus + break durations (Setup → General).")),
-            feature("2.", pick("Detección de distracciones", "Distraction detection"),
+            feature("2", ui::sidebar::IconGlyph::Setup,
+                pick("Detección de distracciones", "Distraction detection"),
                 pick("Vigila la ventana activa y avisa cuando te alejas del trabajo.",
                      "Watches the active window and alerts when you drift off-task.")),
-            feature("3.", pick("Coach IA local", "Local AI coach"),
+            feature("3", ui::sidebar::IconGlyph::Coach,
+                pick("Coach IA local", "Local AI coach"),
                 pick("Mensajes personalizados al iniciar, terminar o pausar sesiones.",
                      "Personalized messages at session start, end, and pauses.")),
-            feature("4.", pick("Resumen diario", "Daily recap"),
+            feature("4", ui::sidebar::IconGlyph::Stats,
+                pick("Resumen diario", "Daily recap"),
                 pick("Cada día genera un resumen con tus números reales (Stats).",
                      "Generates a daily summary from your actual numbers (Stats).")),
-            feature("5.", pick("Estadísticas", "Stats"),
+            feature("5", ui::sidebar::IconGlyph::Stats,
+                pick("Estadísticas", "Stats"),
                 pick("Sesiones, distracciones, gráfica semanal, totales históricos.",
                      "Sessions, distractions, weekly chart, lifetime totals.")),
         ]
@@ -1916,9 +2015,17 @@ impl App {
                 ..Default::default()
             });
 
-        let body = column![title, pitch, status, features, shortcuts]
-            .spacing(SPACE_LG as u16)
-            .max_width(640);
+        let body = column![
+            title,
+            pitch,
+            privacy_hero,
+            cta_row,
+            status,
+            features,
+            shortcuts,
+        ]
+        .spacing(SPACE_LG as u16)
+        .max_width(640);
 
         // FIX-HELP — wrap in a centered container so it doesn't bleed
         // edge-to-edge. The outer container handles BG; an inner padded
@@ -1939,41 +2046,70 @@ impl App {
         .into()
     }
 
+    /// FIX-4 (rc14) — Coach canvas with explicit purpose statement, text-label
+    /// thumbs (no emoji glyphs), looks_coherent filter on history, and a
+    /// "Limpiar historial" button.
     fn view_coach_placeholder(&self) -> Element<'_, Message> {
+        use solar_focus_intelligence::prompts::looks_coherent;
         use ui::palette::*;
 
-        let last = self
-            .last_coaching
-            .clone()
-            .unwrap_or_else(|| match self.settings.language {
-                Language::Es => "(Aún no hay mensajes del coach)".to_string(),
-                Language::En => "(No coach messages yet)".to_string(),
-            });
+        let lang = self.settings.language;
+        let last = self.last_coaching.clone().unwrap_or_else(|| match lang {
+            Language::Es => "(Aún no hay mensajes del coach)".to_string(),
+            Language::En => "(No coach messages yet)".to_string(),
+        });
         let model_badge = if cfg!(feature = "llm") && self.coach.is_ready() {
             format!(
                 "{} · {:?}",
-                match self.settings.language {
+                match lang {
                     Language::Es => "Modelo activo",
                     Language::En => "Active model",
                 },
                 self.settings.model_choice
             )
         } else {
-            match self.settings.language {
+            match lang {
                 Language::Es => "Coach básico (sin LLM cargado)".to_string(),
                 Language::En => "Basic coach (no LLM loaded)".to_string(),
             }
         };
 
+        // FIX-4: explicit purpose subtitle so users know what to do here.
+        let title = text(match lang {
+            Language::Es => "Coach IA",
+            Language::En => "AI Coach",
+        })
+        .size(FONT_TITLE)
+        .color(TEXT_PRIMARY);
+        let subtitle = text(match lang {
+            Language::Es =>
+                "Aquí ves el último mensaje del coach y puedes calificarlo. \
+                 Tu feedback ajusta los próximos.",
+            Language::En =>
+                "Here you see the latest coach message and rate it. \
+                 Your feedback shapes the next ones.",
+        })
+        .size(FONT_BODY)
+        .color(TEXT_SECONDARY);
+
+        // FIX-4: text-label thumbs ("Útil" / "No útil") — emoji-free.
+        let helpful_label = match lang {
+            Language::Es => "Útil",
+            Language::En => "Helpful",
+        };
+        let not_helpful_label = match lang {
+            Language::Es => "No útil",
+            Language::En => "Not helpful",
+        };
         let live = container(
             column![
                 text(model_badge).size(FONT_SMALL).color(TEXT_MUTED),
                 text(last.clone()).size(FONT_LEAD).color(TEXT_PRIMARY),
                 iced::widget::row![
                     iced::widget::horizontal_space(),
-                    ghost_button("👍", Message::ThumbsUp),
+                    ghost_button(helpful_label, Message::ThumbsUp),
                     iced::widget::Space::with_width(SPACE_XS as f32),
-                    ghost_button("👎", Message::ThumbsDown),
+                    ghost_button(not_helpful_label, Message::ThumbsDown),
                 ],
             ]
             .spacing(SPACE_SM as u16),
@@ -1989,13 +2125,19 @@ impl App {
             ..Default::default()
         });
 
-        let recent = self
+        // FIX-4: filter stale broken rows at display time using looks_coherent.
+        let recent: Vec<(String, i32, String)> = self
             .session_repo
             .as_ref()
             .and_then(|r| r.recent_feedback(20).ok())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, _, msg)| looks_coherent(msg, lang))
+            .collect();
+        let has_any_feedback_at_all = self.feedback_counts_cache.0 > 0
+            || self.feedback_counts_cache.1 > 0;
 
-        let history_title = text(match self.settings.language {
+        let history_title = text(match lang {
             Language::Es => "Historial de feedback",
             Language::En => "Feedback history",
         })
@@ -2003,7 +2145,7 @@ impl App {
         .color(TEXT_SECONDARY);
 
         let history_items: Vec<Element<'_, Message>> = if recent.is_empty() {
-            vec![text(match self.settings.language {
+            vec![text(match lang {
                 Language::Es => "(Aún no has dejado feedback.)",
                 Language::En => "(No feedback yet.)",
             })
@@ -2045,16 +2187,31 @@ impl App {
 
         let history_col = column(history_items).spacing(SPACE_XS as u16);
 
+        // FIX-4: "Limpiar historial" button — only visible when there's
+        // something to clear.
+        let clear_button: Element<'_, Message> = if has_any_feedback_at_all {
+            iced::widget::row![
+                iced::widget::horizontal_space(),
+                ghost_button(
+                    match lang {
+                        Language::Es => "Limpiar historial",
+                        Language::En => "Clear history",
+                    },
+                    Message::ClearFeedbackHistory,
+                ),
+            ]
+            .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         let body = column![
-            text(match self.settings.language {
-                Language::Es => "Coach",
-                Language::En => "Coach",
-            })
-            .size(FONT_TITLE)
-            .color(TEXT_PRIMARY),
+            title,
+            subtitle,
             live,
             history_title,
             history_col,
+            clear_button,
         ]
         .spacing(SPACE_LG as u16)
         .padding(SPACE_XL as u16)
@@ -3310,246 +3467,338 @@ impl App {
     }
 
     /// Legacy AI-tab content. UI-4 wraps this with view_setup_tabs.
+    /// FIX-3 (rc14) — AI tab refactor: cards via `settings_card_local`,
+    /// palette tokens only, no duplication with General (lang + RAM removed),
+    /// thresholds + debug button hidden behind "Mostrar avanzado" toggle.
     fn view_settings(&self) -> Element<'_, Message> {
-        let title = text("Ajustes IA").size(20).color(Color::WHITE);
+        use ui::palette::*;
+        use infra::settings::ModelChoice;
 
-        let ai_toggle = row![
-            text(format!("Coaching IA: {}", on_off(self.settings.ai_enabled)))
-                .size(18)
-                .color(Color::WHITE),
-            iced::widget::horizontal_space(),
-            button(text(if self.settings.ai_enabled { "Desactivar" } else { "Activar" }).size(14))
-                .on_press(Message::ToggleAi(!self.settings.ai_enabled))
-                .padding([6, 14]),
-        ]
-        .padding(8);
+        let lang = self.settings.language;
+        let pick = |es: &'static str, en: &'static str| -> &'static str {
+            if lang == Language::Es { es } else { en }
+        };
 
-        let watch_toggle = row![
-            text(format!(
-                "Vigilancia de ventana: {}",
-                on_off(self.settings.window_watch_enabled)
-            ))
-            .size(18)
-            .color(Color::WHITE),
-            iced::widget::horizontal_space(),
-            button(text(if self.settings.window_watch_enabled { "Desactivar" } else { "Activar" }).size(14))
-                .on_press(Message::ToggleWindowWatch(!self.settings.window_watch_enabled))
-                .padding([6, 14]),
-        ]
-        .padding(8);
+        // Card 1: Coach IA on/off.
+        let ai_toggle_card = settings_card_local(
+            pick("Coach IA", "AI Coach"),
+            iced::widget::row![
+                text(if self.settings.ai_enabled {
+                    pick("Activado", "Enabled")
+                } else {
+                    pick("Desactivado", "Disabled")
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                iced::widget::horizontal_space(),
+                chip_local(
+                    if self.settings.ai_enabled {
+                        pick("Desactivar", "Disable").to_string()
+                    } else {
+                        pick("Activar", "Enable").to_string()
+                    },
+                    false,
+                    Message::ToggleAi(!self.settings.ai_enabled),
+                ),
+            ]
+            .into(),
+        );
 
-        let lang_row = row![
-            text(format!("Idioma: {:?}", self.settings.language))
-                .size(18)
-                .color(Color::WHITE),
-            iced::widget::horizontal_space(),
-            button(text("ES").size(14))
-                .on_press(Message::SetLanguage(Language::Es))
-                .padding([6, 14]),
-            iced::widget::Space::with_width(8),
-            button(text("EN").size(14))
-                .on_press(Message::SetLanguage(Language::En))
-                .padding([6, 14]),
-        ]
-        .padding(8);
+        // Card 2: window watch on/off.
+        let watch_toggle_card = settings_card_local(
+            pick("Vigilancia de ventana", "Window watch"),
+            iced::widget::row![
+                text(if self.settings.window_watch_enabled {
+                    pick("Activada", "Enabled")
+                } else {
+                    pick("Desactivada", "Disabled")
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                iced::widget::horizontal_space(),
+                chip_local(
+                    if self.settings.window_watch_enabled {
+                        pick("Desactivar", "Disable").to_string()
+                    } else {
+                        pick("Activar", "Enable").to_string()
+                    },
+                    false,
+                    Message::ToggleWindowWatch(!self.settings.window_watch_enabled),
+                ),
+            ]
+            .into(),
+        );
 
-        let classifier_row = row![
-            text(format!(
-                "Clasificador: {:?}",
-                self.settings.classifier_mode
-            ))
-            .size(18)
-            .color(Color::WHITE),
-            iced::widget::horizontal_space(),
-            button(text("Mock").size(14))
-                .on_press(Message::SetClassifierMode(ClassifierMode::Mock))
-                .padding([6, 14]),
-            iced::widget::Space::with_width(8),
-            button(text("Rules").size(14))
-                .on_press(Message::SetClassifierMode(ClassifierMode::Rules))
-                .padding([6, 14]),
-            iced::widget::Space::with_width(8),
-            button(text("DistilBERT").size(14))
-                .on_press(Message::SetClassifierMode(ClassifierMode::Distilbert))
-                .padding([6, 14]),
-        ]
-        .padding(8);
-
-        use infra::settings::{ModelChoice, RamMode};
-        // ENH-6 — recommended model for this hardware.
+        // Card 3: Modelo IA picker.
         let recommended = recommended_model_choice();
         let mark = |c: ModelChoice, name: &str| -> String {
-            if c == recommended {
-                format!("{} ★", name)
-            } else {
-                name.to_string()
-            }
+            if c == recommended { format!("{} ★", name) } else { name.to_string() }
         };
-        let model_row = row![
-            text(format!("Modelo IA: {:?}", self.settings.model_choice))
-                .size(18)
-                .color(Color::WHITE),
-            iced::widget::horizontal_space(),
-            button(text(mark(ModelChoice::SmolLM2, "SmolLM2")).size(14))
-                .on_press(Message::SetModelChoice(ModelChoice::SmolLM2))
-                .padding([6, 14]),
-            iced::widget::Space::with_width(8),
-            button(text(mark(ModelChoice::Llama1B, "Llama1B")).size(14))
-                .on_press(Message::SetModelChoice(ModelChoice::Llama1B))
-                .padding([6, 14]),
-            iced::widget::Space::with_width(8),
-            button(text(mark(ModelChoice::Qwen15, "Qwen15")).size(14))
-                .on_press(Message::SetModelChoice(ModelChoice::Qwen15))
-                .padding([6, 14]),
-        ]
-        .padding(8);
-        let recommend_hint = text(format!(
-            "{} {:?} ({})",
-            match self.settings.language {
-                Language::Es => "Recomendado para tu hardware:",
-                Language::En => "Recommended for your hardware:",
-            },
-            recommended,
-            if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
-                "Apple Silicon"
-            } else {
-                "general"
-            },
-        ))
-        .size(12)
-        .color(Color::from_rgb(0.5, 0.7, 0.55));
-
-        let ram_row = row![
-            text(format!("Modo RAM: {:?}", self.settings.ram_mode))
-                .size(18)
-                .color(Color::WHITE),
-            iced::widget::horizontal_space(),
-            button(text("Low").size(14))
-                .on_press(Message::SetRamMode(RamMode::Low))
-                .padding([6, 14]),
-            iced::widget::Space::with_width(8),
-            button(text("Normal").size(14))
-                .on_press(Message::SetRamMode(RamMode::Normal))
-                .padding([6, 14]),
-            iced::widget::Space::with_width(8),
-            button(text("Full").size(14))
-                .on_press(Message::SetRamMode(RamMode::Full))
-                .padding([6, 14]),
-        ]
-        .padding(8);
-
-        // Feedback summary moved to Coach canvas in WIRE-1.
-        let thresholds = text(format!(
-            "Umbral conf={:.2}  ·  muestras consecutivas={}  ·  poll={}s",
-            self.settings.min_confidence,
-            self.settings.min_consecutive_samples,
-            self.settings.window_poll_secs,
-        ))
-        .size(13)
-        .color(Color::from_rgb(0.7, 0.75, 0.7));
-
-        let close = button(text("Guardar y cerrar").size(16))
-            .on_press(Message::CloseSettings)
-            .padding([10, 24])
-            .style(|_, _| button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.6, 0.3))),
-                text_color: Color::WHITE,
-                border: iced::Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
+        let model_picker_body: Element<'_, Message> = column![
+            iced::widget::row![
+                text(format!("{:?}", self.settings.model_choice))
+                    .size(FONT_BODY)
+                    .color(TEXT_PRIMARY),
+                iced::widget::horizontal_space(),
+                chip_local(
+                    mark(ModelChoice::SmolLM2, "SmolLM2"),
+                    self.settings.model_choice == ModelChoice::SmolLM2,
+                    Message::SetModelChoice(ModelChoice::SmolLM2),
+                ),
+                iced::widget::Space::with_width(SPACE_XS as f32),
+                chip_local(
+                    mark(ModelChoice::Llama1B, "Llama1B"),
+                    self.settings.model_choice == ModelChoice::Llama1B,
+                    Message::SetModelChoice(ModelChoice::Llama1B),
+                ),
+                iced::widget::Space::with_width(SPACE_XS as f32),
+                chip_local(
+                    mark(ModelChoice::Qwen15, "Qwen15"),
+                    self.settings.model_choice == ModelChoice::Qwen15,
+                    Message::SetModelChoice(ModelChoice::Qwen15),
+                ),
+            ],
+            text(format!(
+                "{} {:?} ({})",
+                pick("Recomendado para tu hardware:", "Recommended for your hardware:"),
+                recommended,
+                if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+                    "Apple Silicon"
+                } else {
+                    "general"
                 },
-                ..Default::default()
-            });
+            ))
+            .size(FONT_TINY)
+            .color(TEXT_MUTED),
+        ]
+        .spacing(SPACE_SM as u16)
+        .into();
+        let model_picker_card = settings_card_local(pick("Modelo IA", "AI model"), model_picker_body);
 
-        let recap_now = button(text("Generar resumen ahora (debug)").size(13))
-            .on_press(Message::GenerateRecapNow)
-            .padding([6, 14])
-            .style(|_, _| button::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.18, 0.30, 0.24))),
-                text_color: Color::WHITE,
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
+        // Card 4: model status (presence / download / delete).
+        let model_status_card = settings_card_local(
+            pick("Estado del modelo", "Model status"),
+            self.model_download_panel(),
+        );
 
-        // WIRE-1: Modelo IA card — uses the unified model_download_panel.
-        let model_card_label = text(match self.settings.language {
-            Language::Es => "Estado del modelo",
-            Language::En => "Model status",
-        })
-        .size(13)
-        .color(Color::from_rgb(0.7, 0.8, 0.7));
-        let model_card = self.model_download_panel();
+        // Card 5: Clasificador.
+        let classifier_card = settings_card_local(
+            pick("Clasificador", "Classifier"),
+            iced::widget::row![
+                text(format!("{:?}", self.settings.classifier_mode))
+                    .size(FONT_BODY)
+                    .color(TEXT_PRIMARY),
+                iced::widget::horizontal_space(),
+                chip_local(
+                    "Mock".to_string(),
+                    self.settings.classifier_mode == ClassifierMode::Mock,
+                    Message::SetClassifierMode(ClassifierMode::Mock),
+                ),
+                iced::widget::Space::with_width(SPACE_XS as f32),
+                chip_local(
+                    "Rules".to_string(),
+                    self.settings.classifier_mode == ClassifierMode::Rules,
+                    Message::SetClassifierMode(ClassifierMode::Rules),
+                ),
+                iced::widget::Space::with_width(SPACE_XS as f32),
+                chip_local(
+                    "DistilBERT".to_string(),
+                    self.settings.classifier_mode == ClassifierMode::Distilbert,
+                    Message::SetClassifierMode(ClassifierMode::Distilbert),
+                ),
+            ]
+            .into(),
+        );
 
-        // ENH-7: DistilBERT downloader — only meaningful when classifier_mode = Distilbert.
-        let distilbert_action: Element<'_, Message> = if matches!(
+        // Optional Card 5b: DistilBERT downloader (only when mode = Distilbert).
+        let distilbert_card: Element<'_, Message> = if matches!(
             self.settings.classifier_mode,
             infra::settings::ClassifierMode::Distilbert
         ) {
             #[cfg(feature = "classifier")]
             {
                 let present = infra::distilbert_download::is_present();
-                let label = match (present, self.settings.language) {
+                let label = match (present, lang) {
                     (true, Language::Es) => "DistilBERT presente",
                     (true, Language::En) => "DistilBERT present",
                     (false, Language::Es) => "Descargar DistilBERT (~67 MB)",
                     (false, Language::En) => "Download DistilBERT (~67 MB)",
                 };
-                row![
-                    text(label).size(13).color(Color::from_rgb(0.7, 0.85, 0.7)),
-                    iced::widget::horizontal_space(),
-                    button(text(if present { "Re-descargar" } else { "Descargar" }).size(13))
-                        .on_press(Message::StartDistilbertDownload)
-                        .padding([4, 12]),
-                ]
-                .padding(8)
-                .into()
+                settings_card_local(
+                    pick("DistilBERT", "DistilBERT"),
+                    iced::widget::row![
+                        text(label.to_string()).size(FONT_BODY).color(TEXT_PRIMARY),
+                        iced::widget::horizontal_space(),
+                        chip_local(
+                            if present {
+                                pick("Re-descargar", "Re-download").to_string()
+                            } else {
+                                pick("Descargar", "Download").to_string()
+                            },
+                            false,
+                            Message::StartDistilbertDownload,
+                        ),
+                    ]
+                    .into(),
+                )
             }
             #[cfg(not(feature = "classifier"))]
             {
-                text("(DistilBERT requiere build con --features classifier)")
-                    .size(12)
-                    .color(Color::from_rgb(0.5, 0.6, 0.55))
-                    .into()
+                settings_card_local(
+                    pick("DistilBERT", "DistilBERT"),
+                    text(pick(
+                        "Requiere build con --features classifier",
+                        "Requires build with --features classifier",
+                    ))
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED)
+                    .into(),
+                )
             }
         } else {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
         };
 
-        let content = column![
-            title,
-            ai_toggle,
-            watch_toggle,
-            lang_row,
-            classifier_row,
-            distilbert_action,
-            model_row,
-            recommend_hint,
-            model_card_label,
-            model_card,
-            ram_row,
-            thresholds,
-            recap_now,
-            close,
-        ]
-        .spacing(12)
-        .max_width(620);
+        // Card 6 — Advanced toggle + collapsible body.
+        let advanced_header = iced::widget::row![
+            text(pick("Avanzado", "Advanced"))
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+            iced::widget::horizontal_space(),
+            chip_local(
+                if self.setup_show_advanced {
+                    pick("Ocultar", "Hide").to_string()
+                } else {
+                    pick("Mostrar", "Show").to_string()
+                },
+                false,
+                Message::ToggleSetupAdvanced,
+            ),
+        ];
+        let advanced_card: Element<'_, Message> = if self.setup_show_advanced {
+            container(
+                column![
+                    advanced_header,
+                    text(format!(
+                        "{}: conf={:.2}  ·  {}={}  ·  poll={}s",
+                        pick("Umbral", "Threshold"),
+                        self.settings.min_confidence,
+                        pick("muestras consecutivas", "consecutive samples"),
+                        self.settings.min_consecutive_samples,
+                        self.settings.window_poll_secs,
+                    ))
+                    .size(FONT_TINY)
+                    .color(TEXT_MUTED),
+                    iced::widget::row![
+                        chip_local(
+                            pick("Generar resumen ahora", "Generate recap now").to_string(),
+                            false,
+                            Message::GenerateRecapNow,
+                        ),
+                    ],
+                ]
+                .spacing(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            container(advanced_header)
+                .padding(SPACE_MD as u16)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
 
-        // Note: Length::Shrink height (default) so this can sit inside the
-        // tabbed Setup canvas without violating any parent constraints.
+        let content = column![
+            ai_toggle_card,
+            watch_toggle_card,
+            model_picker_card,
+            model_status_card,
+            classifier_card,
+            distilbert_card,
+            advanced_card,
+        ]
+        .spacing(SPACE_MD as u16)
+        .max_width(640);
 
         container(content)
-            .padding(20)
+            .padding(SPACE_MD as u16)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.04, 0.06, 0.05))),
+                background: Some(iced::Background::Color(BG)),
                 ..Default::default()
             })
             .into()
     }
 }
 
+/// FIX-3 (rc14) — Reusable card wrapper for Setup tabs. Displays a
+/// muted label header above the body content, all on a SURFACE background
+/// with rounded corners. Replaces the legacy raw `row![]` settings rows.
+fn settings_card_local<'a>(label: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
+    use ui::palette::*;
+    container(
+        column![
+            text(label.to_string())
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+            body,
+        ]
+        .spacing(SPACE_SM as u16),
+    )
+    .padding(SPACE_MD as u16)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(SURFACE)),
+        border: iced::Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// FIX-3 (rc14) — Pill-style chip used for toggle buttons across Setup
+/// tabs. Selected state highlights in ACCENT; unselected uses SURFACE_RAISED.
+fn chip_local<'a>(label: String, selected: bool, msg: Message) -> Element<'a, Message> {
+    use ui::palette::*;
+    iced::widget::button(
+        text(label)
+            .size(FONT_SMALL)
+            .color(if selected { BG } else { TEXT_PRIMARY }),
+    )
+    .on_press(msg)
+    .padding([6, 14])
+    .style(move |_, _| iced::widget::button::Style {
+        background: Some(iced::Background::Color(if selected {
+            ACCENT
+        } else {
+            SURFACE_RAISED
+        })),
+        text_color: if selected { BG } else { TEXT_PRIMARY },
+        border: iced::Border {
+            radius: 6.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+#[allow(dead_code)] // No longer used after FIX-3 AI tab rewrite; kept for compatibility.
 fn on_off(b: bool) -> &'static str {
     if b {
         "ON"

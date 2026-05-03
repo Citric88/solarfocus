@@ -5,40 +5,79 @@
 use crate::types::{CoachingTrigger, FocusContext, DaySummaryContext, Language};
 
 /// FIX-COACH — Curated handcrafted messages keyed on trigger × language × time-of-day.
-/// Picks one randomly so users see variety. The LLM is *not* used here — it's
-/// reserved for tasks where it adds real value (daily summary paraphrasing).
+/// Picks one deterministically by seed so users see variety. The LLM is *not*
+/// used here — it's reserved for tasks where it adds real value (daily summary
+/// paraphrasing).
 ///
 /// Why: SmolLM2-1.7B is too small to reliably write coherent Spanish coaching
 /// lines. After live testing produced "Felicidades, te has felicitado!" the
 /// strategic call is "use the LLM as a paraphraser, not a writer."
+///
+/// FIX-1 (rc14) — SessionStart pools are now split by SessionPhase so we
+/// don't say "Buenos días, primera sesión del día" on the user's 5th session.
 pub fn coaching_curated(trigger: CoachingTrigger, ctx: &FocusContext) -> String {
+    let phase = if ctx.sessions_today == 0 {
+        SessionPhase::First
+    } else {
+        SessionPhase::Continuation
+    };
+
     let pool: &[&str] = match (trigger, ctx.language, time_bucket(ctx.hour_of_day)) {
-        // ─── ES · SessionStart ──────────────────────────────────────────
-        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::Morning) => &[
-            "Buenos días. Vamos por la primera sesión del día.",
-            "Mañana fresca, mente fresca. A enfocar.",
-            "Empieza el día con foco. Cierra pestañas innecesarias.",
-            "Una sesión completa antes del primer café.",
-            "Un sprint de foco para arrancar bien.",
-        ],
-        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::Afternoon) => &[
-            "Tarde productiva. A por la siguiente.",
-            "Una sesión más antes de bajar el ritmo.",
-            "Cierra otras apps y vamos.",
-            "Foco profundo durante los próximos minutos.",
-            "Respira y arranca. Tienes esto.",
-        ],
-        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::Evening) => &[
-            "Sesión de noche. Calma y constancia.",
-            "Foco vespertino. Ritmo tranquilo.",
-            "Cierre del día con foco.",
-            "Una última sesión y a descansar bien.",
-        ],
-        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::LateNight) => &[
-            "Tarde-noche: cuida los ojos y la postura.",
-            "Sesión nocturna. Mantén la pantalla atenuada.",
-            "A enfocar, pero recuerda dormir lo suficiente.",
-        ],
+        // ─── ES · SessionStart (split by phase) ─────────────────────────
+        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::Morning) => match phase {
+            SessionPhase::First => &[
+                "Buenos días. Vamos por la primera sesión del día.",
+                "Mañana fresca, mente fresca. A enfocar.",
+                "Empieza el día con foco. Cierra pestañas innecesarias.",
+                "Una sesión completa antes del primer café.",
+                "Un sprint de foco para arrancar bien.",
+            ],
+            SessionPhase::Continuation => &[
+                "Sigamos la mañana con otra sesión.",
+                "Otra sesión más antes del mediodía.",
+                "Mantén el ritmo de la mañana.",
+                "Cierra distracciones y a enfocar.",
+                "Foco continuo. Vamos.",
+            ],
+        },
+        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::Afternoon) => match phase {
+            SessionPhase::First => &[
+                "Buenas tardes. Primera sesión del día, calma y foco.",
+                "Tarde productiva por delante. Empezamos.",
+                "Sin prisa pero con foco.",
+            ],
+            SessionPhase::Continuation => &[
+                "Tarde productiva. A por la siguiente.",
+                "Una sesión más antes de bajar el ritmo.",
+                "Cierra otras apps y vamos.",
+                "Foco profundo durante los próximos minutos.",
+                "Respira y arranca. Tienes esto.",
+            ],
+        },
+        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::Evening) => match phase {
+            SessionPhase::First => &[
+                "Sesión de noche. Calma y constancia.",
+                "Aún hay tiempo para una sesión productiva.",
+                "Tarde-noche con foco. Vamos.",
+            ],
+            SessionPhase::Continuation => &[
+                "Otra sesión más antes de cerrar.",
+                "Foco vespertino. Ritmo tranquilo.",
+                "Cierre del día con foco.",
+                "Una última sesión y a descansar bien.",
+            ],
+        },
+        (CoachingTrigger::SessionStart, Language::Es, TimeBucket::LateNight) => match phase {
+            SessionPhase::First => &[
+                "Sesión de madrugada: cuida los ojos y la postura.",
+                "Si decides empezar ahora, mantén la pantalla atenuada.",
+            ],
+            SessionPhase::Continuation => &[
+                "Otra sesión nocturna. Recuerda dormir lo suficiente.",
+                "Foco breve y a la cama.",
+                "Mantén el ritmo, pero sin abusar.",
+            ],
+        },
         // ─── ES · SessionComplete ───────────────────────────────────────
         (CoachingTrigger::SessionComplete, Language::Es, _) => &[
             "Sesión completada. Buen trabajo.",
@@ -70,32 +109,61 @@ pub fn coaching_curated(trigger: CoachingTrigger, ctx: &FocusContext) -> String 
             "Racha sostenida. Mañana más.",
         ],
 
-        // ─── EN · SessionStart ──────────────────────────────────────────
-        (CoachingTrigger::SessionStart, Language::En, TimeBucket::Morning) => &[
-            "Good morning. First session of the day.",
-            "Fresh morning, fresh mind. Let's focus.",
-            "Start the day with focus. Close unneeded tabs.",
-            "One full session before the first coffee.",
-            "A focus sprint to kick things off.",
-        ],
-        (CoachingTrigger::SessionStart, Language::En, TimeBucket::Afternoon) => &[
-            "Productive afternoon. On to the next.",
-            "One more session before slowing down.",
-            "Close other apps and go.",
-            "Deep focus for the next few minutes.",
-            "Breathe in and begin. You've got this.",
-        ],
-        (CoachingTrigger::SessionStart, Language::En, TimeBucket::Evening) => &[
-            "Evening session. Calm and steady.",
-            "Late-day focus. Keep the pace gentle.",
-            "Closing the day with focus.",
-            "One last session, then rest well.",
-        ],
-        (CoachingTrigger::SessionStart, Language::En, TimeBucket::LateNight) => &[
-            "Late night: watch your eyes and posture.",
-            "Night session. Dim the screen.",
-            "Focus, but remember to get enough sleep.",
-        ],
+        // ─── EN · SessionStart (split by phase) ─────────────────────────
+        (CoachingTrigger::SessionStart, Language::En, TimeBucket::Morning) => match phase {
+            SessionPhase::First => &[
+                "Good morning. First session of the day.",
+                "Fresh morning, fresh mind. Let's focus.",
+                "Start the day with focus. Close unneeded tabs.",
+                "One full session before the first coffee.",
+                "A focus sprint to kick things off.",
+            ],
+            SessionPhase::Continuation => &[
+                "Keep the morning going with another session.",
+                "One more before noon.",
+                "Hold the morning rhythm.",
+                "Close distractions and refocus.",
+                "Continued focus. Go.",
+            ],
+        },
+        (CoachingTrigger::SessionStart, Language::En, TimeBucket::Afternoon) => match phase {
+            SessionPhase::First => &[
+                "Good afternoon. First session of the day, ease into focus.",
+                "Productive afternoon ahead. Let's begin.",
+                "Slow start, sharp focus.",
+            ],
+            SessionPhase::Continuation => &[
+                "Productive afternoon. On to the next.",
+                "One more session before slowing down.",
+                "Close other apps and go.",
+                "Deep focus for the next few minutes.",
+                "Breathe in and begin. You've got this.",
+            ],
+        },
+        (CoachingTrigger::SessionStart, Language::En, TimeBucket::Evening) => match phase {
+            SessionPhase::First => &[
+                "Evening session. Calm and steady.",
+                "Still time for a focused session.",
+                "Late-day focus. Let's go.",
+            ],
+            SessionPhase::Continuation => &[
+                "One more before wrapping up.",
+                "Late-day focus. Keep the pace gentle.",
+                "Closing the day with focus.",
+                "One last session, then rest well.",
+            ],
+        },
+        (CoachingTrigger::SessionStart, Language::En, TimeBucket::LateNight) => match phase {
+            SessionPhase::First => &[
+                "Late-night session: watch your eyes and posture.",
+                "If you start now, dim the screen.",
+            ],
+            SessionPhase::Continuation => &[
+                "Another late-night session. Don't skimp on sleep.",
+                "Short focus, then bed.",
+                "Hold the rhythm but don't overdo it.",
+            ],
+        },
         // ─── EN · SessionComplete ───────────────────────────────────────
         (CoachingTrigger::SessionComplete, Language::En, _) => &[
             "Session complete. Nice work.",
@@ -148,6 +216,14 @@ enum TimeBucket {
     Afternoon,
     Evening,
     LateNight,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum SessionPhase {
+    /// `sessions_today == 0` — greeting / welcoming language allowed.
+    First,
+    /// `sessions_today >= 1` — must NOT claim "first" / "buenos días".
+    Continuation,
 }
 
 fn time_bucket(hour: u8) -> TimeBucket {
@@ -388,4 +464,173 @@ pub fn coaching_llm_prompt(trigger: CoachingTrigger, ctx: &FocusContext) -> Stri
         "<|im_start|>system\n{}\n<|im_end|>\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n",
         system, user
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx_at_hour(hour: u8, sessions: u8, lang: Language) -> FocusContext {
+        let mut c = FocusContext::empty(lang, 1500);
+        c.hour_of_day = hour;
+        c.sessions_today = sessions;
+        c
+    }
+
+    /// Sample a pool many times across a representative axis (different
+    /// session counts + hour offsets) so the seed-hash hits multiple entries.
+    fn sample_curated(
+        trigger: CoachingTrigger,
+        lang: Language,
+        hour: u8,
+        sessions: u8,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for s in 0..16u8 {
+            let ctx = ctx_at_hour(hour, sessions.saturating_add(s), lang);
+            // We want the *same phase* across samples but vary the seed.
+            // The seed includes sessions_today, so this gives us coverage.
+            if (s == 0 && sessions == 0) || (s > 0 && sessions == 0) {
+                // First-phase samples
+                if sessions == 0 && s == 0 {
+                    out.push(coaching_curated(trigger, &ctx));
+                }
+            } else if sessions > 0 {
+                out.push(coaching_curated(trigger, &ctx));
+            }
+        }
+        // Also add the "exact" case with the original sessions count.
+        out.push(coaching_curated(trigger, &ctx_at_hour(hour, sessions, lang)));
+        out
+    }
+
+    #[test]
+    fn morning_first_vs_continuation_diverge_es() {
+        let first = coaching_curated(
+            CoachingTrigger::SessionStart,
+            &ctx_at_hour(9, 0, Language::Es),
+        );
+        // Sample several continuation messages to make sure none equals First.
+        for s in 1..6u8 {
+            let cont = coaching_curated(
+                CoachingTrigger::SessionStart,
+                &ctx_at_hour(9, s, Language::Es),
+            );
+            assert!(
+                !cont.to_lowercase().contains("primera"),
+                "continuation sample at sessions={} contains 'primera': {}",
+                s,
+                cont
+            );
+            assert!(
+                !cont.to_lowercase().contains("buenos días"),
+                "continuation sample at sessions={} contains 'buenos días': {}",
+                s,
+                cont
+            );
+            assert!(
+                !cont.to_lowercase().contains("primer café"),
+                "continuation sample at sessions={} contains 'primer café': {}",
+                s,
+                cont
+            );
+            assert_ne!(first, cont, "First and Continuation must not collide at sessions={}", s);
+        }
+    }
+
+    #[test]
+    fn morning_first_vs_continuation_diverge_en() {
+        for s in 1..6u8 {
+            let cont = coaching_curated(
+                CoachingTrigger::SessionStart,
+                &ctx_at_hour(9, s, Language::En),
+            );
+            let lower = cont.to_lowercase();
+            assert!(
+                !lower.contains("first session"),
+                "EN continuation contains 'first session': {}",
+                cont
+            );
+            assert!(
+                !lower.contains("good morning"),
+                "EN continuation contains 'good morning': {}",
+                cont
+            );
+            assert!(
+                !lower.contains("first coffee"),
+                "EN continuation contains 'first coffee': {}",
+                cont
+            );
+            assert!(
+                !lower.contains("kick things off"),
+                "EN continuation contains 'kick things off': {}",
+                cont
+            );
+        }
+    }
+
+    #[test]
+    fn continuation_pool_never_says_first_in_any_bucket_or_lang() {
+        let banned_es = ["primera", "buenos días", "buenas tardes"];
+        let banned_en = ["first session", "good morning", "good afternoon"];
+        for hour in [9u8, 14, 20, 2] {
+            for sessions in [1u8, 2, 5, 10] {
+                let es = coaching_curated(
+                    CoachingTrigger::SessionStart,
+                    &ctx_at_hour(hour, sessions, Language::Es),
+                );
+                let lower_es = es.to_lowercase();
+                for w in banned_es.iter() {
+                    assert!(
+                        !lower_es.contains(w),
+                        "ES @ hour={} sessions={} contains '{}': {}",
+                        hour,
+                        sessions,
+                        w,
+                        es
+                    );
+                }
+                let en = coaching_curated(
+                    CoachingTrigger::SessionStart,
+                    &ctx_at_hour(hour, sessions, Language::En),
+                );
+                let lower_en = en.to_lowercase();
+                for w in banned_en.iter() {
+                    assert!(
+                        !lower_en.contains(w),
+                        "EN @ hour={} sessions={} contains '{}': {}",
+                        hour,
+                        sessions,
+                        w,
+                        en
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_bucket_has_nonempty_first_and_cont_pool() {
+        // Sanity: every hour bucket × language × phase combo returns a
+        // non-empty string (would catch an accidental empty array).
+        for hour in [9u8, 14, 20, 2] {
+            for sessions in [0u8, 3] {
+                for lang in [Language::Es, Language::En] {
+                    let s = coaching_curated(
+                        CoachingTrigger::SessionStart,
+                        &ctx_at_hour(hour, sessions, lang),
+                    );
+                    assert!(
+                        s.len() >= 8,
+                        "Empty/short pool at hour={} sessions={} lang={:?}: '{}'",
+                        hour,
+                        sessions,
+                        lang,
+                        s
+                    );
+                }
+            }
+        }
+        let _ = sample_curated; // silence unused warning if tests evolve
+    }
 }
