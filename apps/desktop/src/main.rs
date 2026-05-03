@@ -98,6 +98,11 @@ pub enum Message {
     GenerateRecapNow,
     /// WIRE-1 — delete the model file currently selected.
     DeleteModel,
+    /// ENH-2 — cancel an in-flight download.
+    CancelDownload,
+    /// ENH-7 — fetch DistilBERT model + tokenizer.
+    StartDistilbertDownload,
+    DistilbertDownloadFinished(Result<(), String>),
 
     // Phase 3.5b — daily summary scheduler
     DailyRollCheck,
@@ -142,6 +147,9 @@ pub struct App {
     #[allow(dead_code)]
     download_progress: Arc<StdMutex<Option<DownloadSnapshot>>>,
     download_error: Option<String>,
+    /// ENH-2 — flag flipped by `Message::CancelDownload`. The download
+    /// future polls this between chunks and bails when set.
+    download_cancel: Arc<AtomicBool>,
 
     // Phase 3.5b — daily summary scheduler
     last_summary_date: Option<String>, // ISO YYYY-MM-DD of the last day we summarized
@@ -298,6 +306,7 @@ impl App {
                 download_active: Arc::new(AtomicBool::new(false)),
                 download_progress: Arc::new(StdMutex::new(None)),
                 download_error: None,
+                download_cancel: Arc::new(AtomicBool::new(false)),
                 last_summary_date,
                 recap,
                 route: Route::default(),
@@ -370,6 +379,8 @@ impl App {
         };
         let progress = self.download_progress.clone();
         let active = self.download_active.clone();
+        let cancel = self.download_cancel.clone();
+        cancel.store(false, Ordering::Relaxed);
         active.store(true, Ordering::Relaxed);
         *progress.lock().unwrap() = Some(DownloadSnapshot {
             downloaded: 0,
@@ -384,8 +395,9 @@ impl App {
         );
 
         let progress_for_cb = progress.clone();
+        let cancel_for_fut = cancel.clone();
         let fut = async move {
-            let result = download_model(manifest, move |evt| {
+            let result = download_model(manifest, cancel_for_fut, move |evt| {
                 let mut snap = progress_for_cb.lock().unwrap();
                 let cur = snap.clone().unwrap_or(DownloadSnapshot {
                     downloaded: 0,
@@ -809,7 +821,20 @@ impl App {
                     }
                     Err(e) => {
                         log::error!("Model download failed: {}", e);
-                        self.download_error = Some(e);
+                        let user_facing = if e.contains("cancelled") || e.contains("Cancelled") {
+                            match self.settings.language {
+                                Language::Es => "Descarga cancelada (puedes reanudar desde donde quedaste).".to_string(),
+                                Language::En => "Download cancelled (you can resume from where you left off).".to_string(),
+                            }
+                        } else if e.contains("disk space") || e.contains("space") {
+                            match self.settings.language {
+                                Language::Es => format!("Sin espacio: {}", e),
+                                Language::En => format!("Out of space: {}", e),
+                            }
+                        } else {
+                            e
+                        };
+                        self.download_error = Some(user_facing);
                     }
                 }
                 Task::none()
@@ -850,11 +875,30 @@ impl App {
             Message::SetModelChoice(choice) => {
                 if self.settings.model_choice != choice {
                     self.settings.model_choice = choice;
-                    // Resetting `model_download_skipped` lets the modal
-                    // re-prompt for the newly chosen model file.
                     self.settings.model_download_skipped = false;
                     self.settings.save();
                     log::info!("Model choice → {:?}", choice);
+
+                    // ENH-5: if the chosen model is missing, auto-trigger
+                    // the download instead of forcing the user to click again.
+                    #[cfg(feature = "llm")]
+                    {
+                        use infra::model_download::{manifest_for, model_present};
+                        if let Some(m) = manifest_for(choice) {
+                            if !model_present(m) {
+                                self.toast = Some(Toast {
+                                    text: match self.settings.language {
+                                        Language::Es => format!("Descargando {:?}…", choice),
+                                        Language::En => format!("Downloading {:?}…", choice),
+                                    },
+                                    expires_at: Instant::now() + Duration::from_secs(4),
+                                });
+                                return self.spawn_download();
+                            }
+                        }
+                    }
+
+                    // Already present (or non-llm build) — just notify.
                     self.toast = Some(Toast {
                         text: match self.settings.language {
                             Language::Es => format!("Modelo: {:?} (reinicia para aplicar)", choice),
@@ -1037,6 +1081,53 @@ impl App {
                 });
                 Task::none()
             }
+            Message::StartDistilbertDownload => {
+                #[cfg(feature = "classifier")]
+                {
+                    use infra::distilbert_download::download_distilbert;
+                    let lang = self.settings.language;
+                    let fut = async move {
+                        match download_distilbert().await {
+                            Ok(()) => Ok(()),
+                            Err(e) => Err(format!("{}", e)),
+                        }
+                    };
+                    let _ = lang; // placate compiler if classifier disabled
+                    return Task::perform(fut, Message::DistilbertDownloadFinished);
+                }
+                #[cfg(not(feature = "classifier"))]
+                {
+                    log::warn!("DistilBERT download requested without classifier feature");
+                    Task::none()
+                }
+            }
+            Message::DistilbertDownloadFinished(result) => {
+                let msg = match result {
+                    Ok(()) => match self.settings.language {
+                        Language::Es => "DistilBERT descargado.".to_string(),
+                        Language::En => "DistilBERT downloaded.".to_string(),
+                    },
+                    Err(e) => format!("Error: {}", e),
+                };
+                log::info!("DistilBERT download → {msg}");
+                self.toast = Some(Toast {
+                    text: msg,
+                    expires_at: Instant::now() + Duration::from_secs(6),
+                });
+                // Rebuild classifier so Distilbert mode tries the new file.
+                if matches!(
+                    self.settings.classifier_mode,
+                    infra::settings::ClassifierMode::Distilbert
+                ) {
+                    self.rebuild_classifier();
+                }
+                Task::none()
+            }
+            Message::CancelDownload => {
+                self.download_cancel.store(true, Ordering::Relaxed);
+                log::info!("Download cancellation requested");
+                Task::none()
+            }
             Message::DeleteModel => {
                 #[cfg(feature = "llm")]
                 {
@@ -1114,7 +1205,8 @@ impl App {
         }
 
         let status = self.status_pill();
-        let sidebar = ui::sidebar::view(self.route, status, Message::SwitchRoute);
+        let download_pct = self.sidebar_download_pct();
+        let sidebar = ui::sidebar::view(self.route, status, download_pct, Message::SwitchRoute);
 
         let canvas: Element<'_, Message> = match self.route {
             Route::Focus => self.view_main(),
@@ -1124,6 +1216,18 @@ impl App {
         };
 
         iced::widget::row![sidebar, canvas].into()
+    }
+
+    /// ENH-4 — percentage to show on the Setup sidebar icon during download.
+    fn sidebar_download_pct(&self) -> Option<u8> {
+        if !self.download_active.load(Ordering::Relaxed) {
+            return None;
+        }
+        let snap = self.download_progress.lock().unwrap().clone()?;
+        if snap.total == 0 {
+            return Some(0);
+        }
+        Some(((snap.downloaded as f64 / snap.total as f64) * 100.0).round() as u8)
     }
 
     fn status_pill(&self) -> StatusPill {
@@ -2533,10 +2637,18 @@ impl App {
                     let mb_done = s.downloaded as f64 / 1_048_576.0;
                     let mb_total = s.total as f64 / 1_048_576.0;
                     let kbps = s.bytes_per_sec / 1024;
+                    // ENH-3: detect resume — if we started above 0 with a 0 KB/s sample,
+                    // user is resuming from a partial file.
+                    let is_resume = s.downloaded > 0 && s.bytes_per_sec == 0;
                     let label = if s.verifying {
                         match self.settings.language {
                             Language::Es => "Verificando…".to_string(),
                             Language::En => "Verifying…".to_string(),
+                        }
+                    } else if is_resume {
+                        match self.settings.language {
+                            Language::Es => format!("Reanudando desde {:.1} MB", mb_done),
+                            Language::En => format!("Resuming from {:.1} MB", mb_done),
                         }
                     } else {
                         format!("{:.1}/{:.1} MB · {} KB/s", mb_done, mb_total, kbps)
@@ -2548,7 +2660,27 @@ impl App {
                                 .color(TEXT_MUTED),
                             iced::widget::progress_bar(0.0..=1.0, pct as f32)
                                 .width(Length::Fixed(420.0)),
-                            text(label).size(FONT_SMALL).color(TEXT_SECONDARY),
+                            iced::widget::row![
+                                text(label).size(FONT_SMALL).color(TEXT_SECONDARY),
+                                iced::widget::horizontal_space(),
+                                // ENH-2: cancel button.
+                                iced::widget::button(text(match self.settings.language {
+                                    Language::Es => "Cancelar",
+                                    Language::En => "Cancel",
+                                }).size(FONT_SMALL))
+                                .on_press(Message::CancelDownload)
+                                .padding([4, 12])
+                                .style(|_, _| iced::widget::button::Style {
+                                    background: Some(iced::Background::Color(SURFACE_RAISED)),
+                                    text_color: DANGER,
+                                    border: iced::Border {
+                                        color: DANGER,
+                                        width: 1.0,
+                                        radius: 4.0.into(),
+                                    },
+                                    ..Default::default()
+                                }),
+                            ],
                         ]
                         .spacing(SPACE_SM as u16),
                     )
@@ -2744,24 +2876,48 @@ impl App {
         .padding(8);
 
         use infra::settings::{ModelChoice, RamMode};
+        // ENH-6 — recommended model for this hardware.
+        let recommended = recommended_model_choice();
+        let mark = |c: ModelChoice, name: &str| -> String {
+            if c == recommended {
+                format!("{} ★", name)
+            } else {
+                name.to_string()
+            }
+        };
         let model_row = row![
             text(format!("Modelo IA: {:?}", self.settings.model_choice))
                 .size(18)
                 .color(Color::WHITE),
             iced::widget::horizontal_space(),
-            button(text("SmolLM2").size(14))
+            button(text(mark(ModelChoice::SmolLM2, "SmolLM2")).size(14))
                 .on_press(Message::SetModelChoice(ModelChoice::SmolLM2))
                 .padding([6, 14]),
             iced::widget::Space::with_width(8),
-            button(text("Llama1B").size(14))
+            button(text(mark(ModelChoice::Llama1B, "Llama1B")).size(14))
                 .on_press(Message::SetModelChoice(ModelChoice::Llama1B))
                 .padding([6, 14]),
             iced::widget::Space::with_width(8),
-            button(text("Qwen15").size(14))
+            button(text(mark(ModelChoice::Qwen15, "Qwen15")).size(14))
                 .on_press(Message::SetModelChoice(ModelChoice::Qwen15))
                 .padding([6, 14]),
         ]
         .padding(8);
+        let recommend_hint = text(format!(
+            "{} {:?} ({})",
+            match self.settings.language {
+                Language::Es => "Recomendado para tu hardware:",
+                Language::En => "Recommended for your hardware:",
+            },
+            recommended,
+            if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+                "Apple Silicon"
+            } else {
+                "general"
+            },
+        ))
+        .size(12)
+        .color(Color::from_rgb(0.5, 0.7, 0.55));
 
         let ram_row = row![
             text(format!("Modo RAM: {:?}", self.settings.ram_mode))
@@ -2827,13 +2983,50 @@ impl App {
         .color(Color::from_rgb(0.7, 0.8, 0.7));
         let model_card = self.model_download_panel();
 
+        // ENH-7: DistilBERT downloader — only meaningful when classifier_mode = Distilbert.
+        let distilbert_action: Element<'_, Message> = if matches!(
+            self.settings.classifier_mode,
+            infra::settings::ClassifierMode::Distilbert
+        ) {
+            #[cfg(feature = "classifier")]
+            {
+                let present = infra::distilbert_download::is_present();
+                let label = match (present, self.settings.language) {
+                    (true, Language::Es) => "DistilBERT presente",
+                    (true, Language::En) => "DistilBERT present",
+                    (false, Language::Es) => "Descargar DistilBERT (~67 MB)",
+                    (false, Language::En) => "Download DistilBERT (~67 MB)",
+                };
+                row![
+                    text(label).size(13).color(Color::from_rgb(0.7, 0.85, 0.7)),
+                    iced::widget::horizontal_space(),
+                    button(text(if present { "Re-descargar" } else { "Descargar" }).size(13))
+                        .on_press(Message::StartDistilbertDownload)
+                        .padding([4, 12]),
+                ]
+                .padding(8)
+                .into()
+            }
+            #[cfg(not(feature = "classifier"))]
+            {
+                text("(DistilBERT requiere build con --features classifier)")
+                    .size(12)
+                    .color(Color::from_rgb(0.5, 0.6, 0.55))
+                    .into()
+            }
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         let content = column![
             title,
             ai_toggle,
             watch_toggle,
             lang_row,
             classifier_row,
+            distilbert_action,
             model_row,
+            recommend_hint,
             model_card_label,
             model_card,
             ram_row,
@@ -2888,6 +3081,24 @@ fn wipe_all_local_data() -> u32 {
         try_remove(d.data_dir().join("models"));
     }
     n
+}
+
+/// ENH-6 — heuristic hardware recommendation.
+///   - Apple Silicon (target_arch=aarch64 + target_os=macos) → SmolLM2 (best quality on Metal).
+///   - Lower-spec systems (CPU cores < 8) → Llama-1B (lightest, fastest).
+///   - Otherwise → Qwen2.5-1.5B (balanced multilingual).
+fn recommended_model_choice() -> infra::settings::ModelChoice {
+    use infra::settings::ModelChoice;
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        ModelChoice::SmolLM2
+    } else if cores < 8 {
+        ModelChoice::Llama1B
+    } else {
+        ModelChoice::Qwen15
+    }
 }
 
 /// Synchronous one-off probe of the foreground-window API. Cheap (~ms);

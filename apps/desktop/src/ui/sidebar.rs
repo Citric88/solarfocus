@@ -54,11 +54,13 @@ impl StatusPill {
     }
 }
 
-/// Build the sidebar element. Caller provides current route + status,
-/// receives selected-route messages back.
+/// Build the sidebar element. Caller provides current route + status +
+/// optional download-progress percentage (0..=100) shown as a small badge
+/// over the Setup icon.
 pub fn view<'a, Msg: Clone + 'a>(
     current: Route,
     status: StatusPill,
+    download_pct: Option<u8>,
     on_select: impl Fn(Route) -> Msg + 'a,
 ) -> Element<'a, Msg> {
     let on_select = std::rc::Rc::new(on_select);
@@ -66,6 +68,16 @@ pub fn view<'a, Msg: Clone + 'a>(
     let make_btn = |route: Route, glyph: IconGlyph, label: &'static str| -> Element<'a, Msg> {
         let selected = route == current;
         let on_select = on_select.clone();
+        // ENH-4: small badge over Setup icon when a download is active.
+        let badge: Element<'a, Msg> = if route == Route::Setup && download_pct.is_some() {
+            let p = download_pct.unwrap();
+            text(format!("{p}%"))
+                .size(palette::FONT_TINY)
+                .color(palette::ACCENT)
+                .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
         button(
             column![
                 Canvas::new(IconCanvas { glyph, selected })
@@ -78,6 +90,7 @@ pub fn view<'a, Msg: Clone + 'a>(
                     } else {
                         palette::TEXT_SECONDARY
                     }),
+                badge,
             ]
             .spacing(2)
             .align_x(iced::alignment::Horizontal::Center),

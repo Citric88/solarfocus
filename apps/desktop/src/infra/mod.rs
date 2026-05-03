@@ -17,9 +17,11 @@ pub mod window_watch;
 // ⚙️ v1.2: settings JSON persistidos
 pub mod settings;
 
-// 🧠 v1.2 Phase 3: LLM tier (feature-gated)
-#[cfg(feature = "llm")]
+// 🧠 v1.2 Phase 3+4: download stack (shared by llm + classifier features).
+#[cfg(any(feature = "llm", feature = "classifier"))]
 pub mod model_download;
+
+// 🧠 v1.2 Phase 3: LLM tier (feature-gated)
 #[cfg(feature = "llm")]
 pub mod llm;
 #[cfg(feature = "llm")]
@@ -28,6 +30,8 @@ pub mod llm_coach;
 // 🧠 v1.2 Phase 4: ONNX classifier (feature-gated)
 #[cfg(feature = "classifier")]
 pub mod onnx_classifier;
+#[cfg(feature = "classifier")]
+pub mod distilbert_download;
 
 use chrono::Utc;
 

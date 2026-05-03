@@ -30,6 +30,7 @@ llama-cpp-2 = { version = "0.1.146", default-features = false, features = ["samp
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 sha2 = "0.10"
 futures-util = "0.3"
+fs2 = "0.4"
 
 # 🧠 Phase 4 — Classifier tier (feature-gated in apps/desktop behind `classifier`)
 ort = "2.0.0-rc.12"

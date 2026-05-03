@@ -1,5 +1,6 @@
-#![cfg(feature = "llm")]
-//! Model file downloader for the Phase 3 LLM tier.
+#![cfg(any(feature = "llm", feature = "classifier"))]
+//! Model file downloader for the Phase 3 LLM tier (and Phase 4 classifier
+//! via the shared `download_file` helper).
 //!
 //! - HTTP `Range` header for resume.
 //! - SHA-256 verification before promoting `.partial` → final filename.
@@ -98,12 +99,35 @@ pub enum DownloadError {
     Http(String),
     #[error("checksum mismatch (expected {expected}, got {got})")]
     Checksum { expected: String, got: String },
+    #[error("not enough disk space ({available_mb} MB free, need {needed_mb} MB)")]
+    NoSpace { available_mb: u64, needed_mb: u64 },
+    #[error("cancelled")]
+    Cancelled,
+}
+
+/// Check available bytes on the filesystem holding `path`. Cross-platform via fs2.
+pub fn available_bytes(path: &Path) -> u64 {
+    // ENH-1 — disk-space pre-check.
+    // fs2 needs an existing path; walk up until we find one.
+    let mut probe = path.to_path_buf();
+    loop {
+        if probe.exists() {
+            return fs2::available_space(&probe).unwrap_or(0);
+        }
+        match probe.parent() {
+            Some(p) => probe = p.to_path_buf(),
+            None => return 0,
+        }
+    }
 }
 
 /// Downloads `manifest` into `models_dir()` with resume support.
-/// Calls `on_event` with progress; cancellation = drop the future.
+/// Calls `on_event` with progress. `cancel_flag` (Arc<AtomicBool>) lets the
+/// caller signal cancellation mid-download; the function bails with
+/// DownloadError::Cancelled and leaves the .partial file on disk for resume.
 pub async fn download_model<F>(
     manifest: &'static ModelManifest,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     mut on_event: F,
 ) -> Result<PathBuf, DownloadError>
 where
@@ -126,6 +150,31 @@ where
         Ok(m) => m.len(),
         Err(_) => 0,
     };
+
+    // ENH-1: disk-space pre-check. Need at least the remaining bytes plus
+    // a 200 MB safety margin (model is ~1 GB; tight final-vs-partial swap
+    // benefits from headroom).
+    let remaining_bytes = manifest.size_bytes.saturating_sub(already_downloaded);
+    let need_bytes = remaining_bytes + 200 * 1024 * 1024;
+    let avail = available_bytes(&dir);
+    if avail < need_bytes {
+        return Err(DownloadError::NoSpace {
+            available_mb: avail / (1024 * 1024),
+            needed_mb: need_bytes / (1024 * 1024),
+        });
+    }
+
+    // ENH-3: emit the resume snapshot to the UI before the HTTP request.
+    if already_downloaded > 0 {
+        on_event(DownloadEvent::Started {
+            total_bytes: manifest.size_bytes,
+        });
+        on_event(DownloadEvent::Progress {
+            downloaded: already_downloaded,
+            total: manifest.size_bytes,
+            bytes_per_sec: 0,
+        });
+    }
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
@@ -164,6 +213,10 @@ where
     let mut session_bytes: u64 = 0;
 
     while let Some(chunk_res) = stream.next().await {
+        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            // Leave .partial on disk for resume.
+            return Err(DownloadError::Cancelled);
+        }
         let chunk = chunk_res.map_err(|e| DownloadError::Http(e.to_string()))?;
         file.write_all(&chunk).await?;
         already_downloaded += chunk.len() as u64;
@@ -210,6 +263,53 @@ where
 fn verify_sha256(path: &Path, expected_hex: &str) -> std::io::Result<bool> {
     let got = compute_sha256(path)?;
     Ok(got.eq_ignore_ascii_case(expected_hex))
+}
+
+/// Generic file downloader used by both the LLM model fetcher and the
+/// Phase 4 DistilBERT downloader. No resume support (small files); fixes
+/// the file in-place at `dest` after SHA verify.
+pub async fn download_file(
+    url: &str,
+    dest: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<(), DownloadError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if dest.exists() {
+        if let Some(sha) = expected_sha256 {
+            if verify_sha256(dest, sha).unwrap_or(false) {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| DownloadError::Http(e.to_string()))?;
+    let resp = client.get(url).send().await.map_err(|e| DownloadError::Http(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(DownloadError::Http(format!("HTTP {}", status)));
+    }
+    let bytes = resp.bytes().await.map_err(|e| DownloadError::Http(e.to_string()))?;
+    let tmp = dest.with_extension("partial");
+    std::fs::write(&tmp, &bytes)?;
+    if let Some(sha) = expected_sha256 {
+        if !verify_sha256(&tmp, sha).unwrap_or(false) {
+            let got = compute_sha256(&tmp).unwrap_or_default();
+            let _ = std::fs::remove_file(&tmp);
+            return Err(DownloadError::Checksum {
+                expected: sha.to_string(),
+                got,
+            });
+        }
+    }
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
 }
 
 fn compute_sha256(path: &Path) -> std::io::Result<String> {
