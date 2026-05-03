@@ -1081,17 +1081,30 @@ impl App {
                     if matches!(self.route, Route::Setup | Route::Stats) {
                         self.refresh_setup_caches();
                     }
-                    // WIRE-2: re-probe permission when switching to a route
-                    // that surfaces it.
-                    if matches!(self.route, Route::Stats | Route::Setup) {
+                    // PERF-2: only re-probe permission if it's still Unknown
+                    // (initial probe may not have landed yet). Manual
+                    // "Re-verificar" button in Privacy tab handles refresh
+                    // after the user grants permission in System Settings.
+                    if matches!(self.route, Route::Stats | Route::Setup)
+                        && self.permission_status == PermissionStatus::Unknown
+                    {
                         return Task::done(Message::ProbePermission);
                     }
                 }
                 Task::none()
             }
             Message::ProbePermission => {
-                let status = probe_permission_now();
-                Task::done(Message::PermissionProbed(status))
+                // PERF-2: never block the UI thread on the OS window query.
+                // active-win-pos-rs can be slow under contention (LLM load
+                // running, many windows open). spawn_blocking offloads it.
+                Task::perform(
+                    async {
+                        tokio::task::spawn_blocking(probe_permission_now)
+                            .await
+                            .unwrap_or(PermissionStatus::Unknown)
+                    },
+                    Message::PermissionProbed,
+                )
             }
             Message::PermissionProbed(status) => {
                 if status != self.permission_status {
