@@ -1738,9 +1738,12 @@ impl App {
             .width(Length::Fixed(560.0))
             .style(|_| container::Style {
                 background: Some(iced::Background::Color(SURFACE_RAISED)),
+                // rc16 — 1px ACCENT_DIM border so the recap card reads
+                // as a distinct surface against the canvas BG.
                 border: iced::Border {
                     radius: 8.0.into(),
-                    ..Default::default()
+                    width: 1.0,
+                    color: ACCENT_DIM,
                 },
                 ..Default::default()
             })
@@ -3882,9 +3885,12 @@ fn settings_card_local<'a>(label: &'a str, body: Element<'a, Message>) -> Elemen
     .padding(SPACE_MD as u16)
     .style(|_| container::Style {
         background: Some(iced::Background::Color(SURFACE)),
+        // rc16 — 1px ACCENT_DIM border separates the card from the
+        // canvas BG so chips inside don't bleed visually.
         border: iced::Border {
             radius: 8.0.into(),
-            ..Default::default()
+            width: 1.0,
+            color: ACCENT_DIM,
         },
         ..Default::default()
     })
@@ -3892,7 +3898,10 @@ fn settings_card_local<'a>(label: &'a str, body: Element<'a, Message>) -> Elemen
 }
 
 /// FIX-3 (rc14) — Pill-style chip used for toggle buttons across Setup
-/// tabs. Selected state highlights in ACCENT; unselected uses SURFACE_RAISED.
+/// tabs. Selected state highlights in ACCENT; unselected uses
+/// SURFACE_RAISED **with a 1.5 px ACCENT_DIM border** so the silhouette
+/// is visible against the card's SURFACE background (rc16 — fix for
+/// "non-selected chips are almost invisible").
 fn chip_local<'a>(label: String, selected: bool, msg: Message) -> Element<'a, Message> {
     use ui::palette::*;
     iced::widget::button(
@@ -3902,18 +3911,30 @@ fn chip_local<'a>(label: String, selected: bool, msg: Message) -> Element<'a, Me
     )
     .on_press(msg)
     .padding([6, 14])
-    .style(move |_, _| iced::widget::button::Style {
-        background: Some(iced::Background::Color(if selected {
-            ACCENT
-        } else {
-            SURFACE_RAISED
-        })),
-        text_color: if selected { BG } else { TEXT_PRIMARY },
-        border: iced::Border {
-            radius: 6.0.into(),
+    .style(move |_, status| {
+        let hovered = matches!(status, iced::widget::button::Status::Hovered);
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(if selected {
+                ACCENT
+            } else if hovered {
+                // Slightly brighter fill on hover to confirm interactivity.
+                Color {
+                    r: SURFACE_RAISED.r + 0.04,
+                    g: SURFACE_RAISED.g + 0.04,
+                    b: SURFACE_RAISED.b + 0.04,
+                    a: 1.0,
+                }
+            } else {
+                SURFACE_RAISED
+            })),
+            text_color: if selected { BG } else { TEXT_PRIMARY },
+            border: iced::Border {
+                radius: 6.0.into(),
+                width: if selected { 0.0 } else { 1.5 },
+                color: if selected { ACCENT } else { ACCENT_DIM },
+            },
             ..Default::default()
-        },
-        ..Default::default()
+        }
     })
     .into()
 }
