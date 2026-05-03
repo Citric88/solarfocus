@@ -73,6 +73,9 @@ pub enum Message {
     SetFocusMinutesText(String),
     SetBreakMinutesText(String),
     SetLongBreakMinutesText(String),
+    // v1.3 Wave A2 — named focus category for the next session.
+    SetCategory(String),
+    SetCategoryText(String),
     ThumbsUp,
     ThumbsDown,
 
@@ -196,6 +199,10 @@ pub struct App {
     custom_focus_str: String,
     custom_break_str: String,
     custom_long_break_str: String,
+    // v1.3 Wave A2 — ephemeral text buffer for free-form category label.
+    // Mirrors settings.last_category and is only re-applied to settings
+    // when non-empty after trim.
+    custom_category_str: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,6 +369,7 @@ impl App {
         let custom_focus_str = settings.focus_minutes.to_string();
         let custom_break_str = settings.break_minutes.to_string();
         let custom_long_break_str = settings.long_break_minutes.to_string();
+        let custom_category_str = settings.last_category.clone();
 
         (
             Self {
@@ -398,6 +406,7 @@ impl App {
                 custom_focus_str,
                 custom_break_str,
                 custom_long_break_str,
+                custom_category_str,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).
@@ -637,6 +646,9 @@ impl App {
             distractions_today: self.distractions_today,
             focus_minutes_7d,
             last_distraction,
+            // v1.3 Wave A3 — pass the user's chosen category through
+            // so the curated bank can pick a category-flavored line.
+            category: Some(self.settings.last_category.clone()),
         }
     }
 
@@ -799,6 +811,7 @@ impl App {
                         start_time: Utc::now(),
                         duration,
                         state: "completed".to_string(),
+                        category: self.settings.last_category.clone(),
                     };
                     match repo.save_session(&record) {
                         Ok(id) => log::info!("Sesión #{} guardada", id),
@@ -1144,6 +1157,25 @@ impl App {
                     self.settings.long_break_minutes = m;
                     self.settings.save();
                     self.pomodoro_engine.config_mut().long_break_duration = (m as f32) * 60.0;
+                }
+                Task::none()
+            }
+            // v1.3 Wave A2 — set the category for the next focus session.
+            // Persisted so chip selection survives restarts.
+            Message::SetCategory(c) => {
+                self.settings.last_category = c.clone();
+                self.custom_category_str = c.clone();
+                self.settings.save();
+                log::info!("Category → {}", c);
+                Task::none()
+            }
+            Message::SetCategoryText(s) => {
+                // Cap to a sane length to keep DB rows bounded.
+                let trimmed: String = s.chars().take(40).collect();
+                self.custom_category_str = trimmed.clone();
+                if !trimmed.trim().is_empty() {
+                    self.settings.last_category = trimmed.trim().to_string();
+                    self.settings.save();
                 }
                 Task::none()
             }
@@ -2470,9 +2502,23 @@ impl App {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
         };
 
+        // v1.3 Wave A2 — category picker only when idle (you choose
+        // before you start; once running, the category is locked in for
+        // that session).
+        let category_picker: Element<'_, Message> = if matches!(
+            self.pomodoro_engine.state(),
+            SolarFocusCore::AppState::Idle | SolarFocusCore::AppState::Completed
+        ) {
+            self.category_picker()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         let content = column![
             hero,
-            iced::widget::Space::with_height(Length::Fixed(SPACE_LG as f32)),
+            iced::widget::Space::with_height(Length::Fixed(SPACE_MD as f32)),
+            category_picker,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
             cta,
             iced::widget::Space::with_height(Length::Fixed(SPACE_MD as f32)),
             microcopy,
@@ -2492,6 +2538,70 @@ impl App {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// v1.3 Wave A2 — Renders the category chip row + free-form text
+    /// input shown above the Start button on the Focus canvas.
+    fn category_picker(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        let lang = self.settings.language;
+        let presets: &[(&str, &str)] = &[
+            ("Deep work", "Trabajo profundo"),
+            ("Coding", "Código"),
+            ("Reading", "Lectura"),
+            ("Writing", "Escritura"),
+            ("Other", "Otro"),
+        ];
+        let label = match lang {
+            Language::Es => "Categoría de la sesión",
+            Language::En => "Session category",
+        };
+        let current = self.settings.last_category.as_str();
+        let mut chip_row = iced::widget::Row::new().spacing(SPACE_XS as u16);
+        for (en, es) in presets {
+            let display = match lang {
+                Language::Es => *es,
+                Language::En => *en,
+            };
+            let selected = current.eq_ignore_ascii_case(en) || current == display;
+            chip_row = chip_row.push(chip_local(
+                display.to_string(),
+                selected,
+                Message::SetCategory(en.to_string()),
+            ));
+        }
+        let custom_input = iced::widget::text_input(
+            match lang {
+                Language::Es => "Otra…",
+                Language::En => "Other…",
+            },
+            &self.custom_category_str,
+        )
+        .on_input(Message::SetCategoryText)
+        .width(Length::Fixed(160.0))
+        .padding([4, 8])
+        .size(FONT_SMALL);
+
+        container(
+            column![
+                text(label).size(FONT_SMALL).color(TEXT_MUTED),
+                chip_row,
+                custom_input,
+            ]
+            .spacing(SPACE_XS as u16)
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+        .padding(SPACE_SM as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: ACCENT_DIM,
+            },
+            ..Default::default()
+        })
+        .into()
     }
 
     fn state_label(&self) -> String {

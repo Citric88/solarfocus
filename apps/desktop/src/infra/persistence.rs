@@ -11,12 +11,13 @@ use directories::ProjectDirs;
 use std::path::PathBuf;
 
 /// Estructura para registro de sesión en base de datos
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionRecord {
     pub id: Option<u64>,              // ID autoincremental (anonimo)
     pub start_time: DateTime<Utc>,    // Timestamp ISO 8601 (sin usuario)
     pub duration: f32,                // Duración total planificada (segundos)
     pub state: String,                // "focus", "break", "completed"
+    pub category: String,             // v1.3 — "Deep work", "Coding", etc.
 }
 
 /// Gestor de persistencia SQLite con privacidad garantizada
@@ -43,10 +44,35 @@ impl SessionRepository {
                 start_time TEXT NOT NULL,
                 duration REAL NOT NULL,
                 state TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'Focus',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )",
             [],
         )?;
+
+        // v1.3 Wave A2 — additive migration for v1.2 DBs that pre-date the
+        // category column. PRAGMA table_info() lists the columns; if
+        // `category` is missing we ALTER it in. Safe and idempotent.
+        let has_category: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+            let mut rows = stmt.query([])?;
+            let mut found = false;
+            while let Some(r) = rows.next()? {
+                let name: String = r.get(1)?;
+                if name == "category" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_category {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN category TEXT NOT NULL DEFAULT 'Focus'",
+                [],
+            )?;
+            log::info!("v1.3 migration: sessions.category column added");
+        }
 
         // v1.2 Phase 3 — daily LLM-generated summaries.
         conn.execute(
@@ -150,26 +176,59 @@ impl SessionRepository {
     /// Guarda un registro de sesión al finalizarla
     pub fn save_session(&self, record: &SessionRecord) -> SqlResult<u64> {
         let start_time = record.start_time.to_rfc3339();
-        
+
         if let Some(id) = record.id {
             self.conn.execute(
-                "UPDATE sessions SET start_time=?, duration=?, state=? WHERE id=?",
-                rusqlite::params![start_time, record.duration as f64, record.state, id],
+                "UPDATE sessions SET start_time=?, duration=?, state=?, category=? WHERE id=?",
+                rusqlite::params![
+                    start_time,
+                    record.duration as f64,
+                    record.state,
+                    record.category,
+                    id,
+                ],
             )?;
             Ok(id)
         } else {
             self.conn.execute(
-                "INSERT INTO sessions (start_time, duration, state) VALUES (?, ?, ?)",
-                rusqlite::params![start_time, record.duration as f64, record.state],
+                "INSERT INTO sessions (start_time, duration, state, category) VALUES (?, ?, ?, ?)",
+                rusqlite::params![
+                    start_time,
+                    record.duration as f64,
+                    record.state,
+                    record.category,
+                ],
             )?;
             Ok(self.conn.last_insert_rowid() as u64)
         }
+    }
+
+    /// v1.3 Wave A2 — totals grouped by category over the last N days
+    /// for completed focus sessions. Returns Vec<(category, total_secs,
+    /// session_count)> sorted by total_secs desc.
+    pub fn category_totals_last_days(&self, days: u32) -> SqlResult<Vec<(String, u32, u32)>> {
+        let cutoff = format!("-{} days", days.saturating_sub(1));
+        let mut stmt = self.conn.prepare(
+            "SELECT category, COALESCE(SUM(duration), 0), COUNT(*) FROM sessions
+             WHERE state = 'completed' AND date(start_time) >= date('now', ?)
+             GROUP BY category
+             ORDER BY SUM(duration) DESC",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![cutoff])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            let cat: String = r.get(0)?;
+            let secs: f64 = r.get(1)?;
+            let count: u32 = r.get(2)?;
+            out.push((cat, secs as u32, count));
+        }
+        Ok(out)
     }
     
     /// Obtiene estadísticas de sesiones del día actual (anonimizado)
     pub fn get_today_stats(&self) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state FROM sessions
+            "SELECT id, start_time, duration, state, category FROM sessions
              WHERE date(start_time) = date('now', 'start of day') ORDER BY start_time DESC"
         )?;
 
@@ -185,7 +244,7 @@ impl SessionRepository {
     /// scheduler de resumen diario para procesar el día anterior.
     pub fn sessions_for_date(&self, date: &str) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state FROM sessions
+            "SELECT id, start_time, duration, state, category FROM sessions
              WHERE date(start_time) = ? ORDER BY start_time ASC",
         )?;
         let mut rows = stmt.query(rusqlite::params![date])?;
@@ -291,7 +350,7 @@ impl SessionRepository {
     /// Obtiene todas las sesiones (para depuración - anonimizado)
     pub fn list_all_sessions(&self) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state FROM sessions ORDER BY id DESC LIMIT 10"
+            "SELECT id, start_time, duration, state, category FROM sessions ORDER BY id DESC LIMIT 10"
         )?;
 
         let mut rows = stmt.query([])?;
@@ -321,6 +380,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> SqlResult<SessionRecord> {
         start_time,
         duration: row.get::<_, f64>(2)? as f32,
         state: row.get(3)?,
+        category: row.get(4)?,
     })
 }
 
@@ -361,6 +421,7 @@ mod tests {
             start_time: Utc::now(),
             duration: 25.0,
             state: "focus".to_string(),
+            category: "Focus".to_string(),
         };
 
         let id = repo.save_session(&record).unwrap();
@@ -381,10 +442,69 @@ mod tests {
             start_time: Utc::now(),
             duration: 0.0,
             state: "invalid".to_string(),
+            category: "Other".to_string(),
         };
 
         let result = repo.save_session(&invalid_record);
         assert!(result.is_ok(), "Phase 1: no strict validation yet (TODO phase 2)");
+    }
+
+    /// v1.3 Wave A2 — opening a v1.2-shape DB (no `category` column)
+    /// runs the additive migration and existing rows default to "Focus".
+    #[test]
+    fn sessions_schema_migrates_v1_2_to_v1_3() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "solarfocus_migrate_{}_{}.db",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // Pre-create a v1.2-shape DB without `category` and seed one row.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_time TEXT NOT NULL,
+                    duration REAL NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (start_time, duration, state) VALUES (?, ?, ?)",
+                rusqlite::params!["2026-04-30T10:00:00Z", 1500.0, "completed"],
+            )
+            .unwrap();
+        }
+
+        // Now open via SessionRepository — should auto-migrate.
+        let repo = SessionRepository::new_at_path(&path).unwrap();
+        let rows = repo.list_all_sessions().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].category, "Focus",
+            "v1.2 row should default to 'Focus' after migration"
+        );
+
+        // New inserts now carry the category through.
+        let r = SessionRecord {
+            id: None,
+            start_time: Utc::now(),
+            duration: 1500.0,
+            state: "completed".to_string(),
+            category: "Coding".to_string(),
+        };
+        repo.save_session(&r).unwrap();
+        let totals = repo.category_totals_last_days(7).unwrap();
+        // Both legacy "Focus" and new "Coding" appear.
+        let cats: Vec<&str> = totals.iter().map(|(c, _, _)| c.as_str()).collect();
+        assert!(cats.contains(&"Coding"));
+        assert!(cats.contains(&"Focus"));
     }
 
     /// FIX-4 (rc14) — clear_feedback empties the table and zeroes the counts.

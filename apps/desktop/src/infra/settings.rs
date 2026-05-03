@@ -114,6 +114,16 @@ pub struct Settings {
     pub break_minutes: u32,
     #[serde(default = "default_long_break_minutes")]
     pub long_break_minutes: u32,
+
+    // v1.3 Wave A2 — last selected focus category. Persisted so the chip
+    // selection survives restarts. Default "Focus" matches the legacy
+    // value used by v1.2 rows after migration.
+    #[serde(default = "default_category")]
+    pub last_category: String,
+}
+
+fn default_category() -> String {
+    "Focus".to_string()
 }
 
 fn default_focus_minutes() -> u32 {
@@ -166,6 +176,7 @@ impl Default for Settings {
             focus_minutes: 25,
             break_minutes: 5,
             long_break_minutes: 15,
+            last_category: default_category(),
         }
     }
 }

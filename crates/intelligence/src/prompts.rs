@@ -22,6 +22,17 @@ pub fn coaching_curated(trigger: CoachingTrigger, ctx: &FocusContext) -> String 
         SessionPhase::Continuation
     };
 
+    // v1.3 Wave A3 — category-aware override for SessionStart only.
+    // If the user picked a known category, give them a line that names
+    // it. Other triggers stay generic to keep the pool small.
+    if matches!(trigger, CoachingTrigger::SessionStart) {
+        if let Some(cat) = ctx.category.as_deref() {
+            if let Some(line) = category_session_start(cat, ctx.language, ctx.hour_of_day, ctx.sessions_today) {
+                return line;
+            }
+        }
+    }
+
     let pool: &[&str] = match (trigger, ctx.language, time_bucket(ctx.hour_of_day)) {
         // ─── ES · SessionStart (split by phase) ─────────────────────────
         (CoachingTrigger::SessionStart, Language::Es, TimeBucket::Morning) => match phase {
@@ -208,6 +219,61 @@ pub fn coaching_curated(trigger: CoachingTrigger, ctx: &FocusContext) -> String 
             CoachingTrigger::StreakMilestone(n) => 5 + n as usize,
         });
     pool[seed % pool.len()].to_string()
+}
+
+/// v1.3 Wave A3 — category-flavored SessionStart lines. Returns
+/// `None` when the category isn't one we have copy for (e.g. user
+/// typed "Other" or a free-form label) — caller falls back to the
+/// generic pool.
+fn category_session_start(category: &str, lang: Language, hour: u8, sessions_today: u8) -> Option<String> {
+    let key = category.trim().to_lowercase();
+    let pool: &[&str] = match (key.as_str(), lang) {
+        ("coding" | "código" | "codigo", Language::Es) => &[
+            "A escribir código sin distracciones.",
+            "Sesión de código. Cierra Slack y a por el siguiente bug.",
+            "Una sesión limpia: el editor y tú.",
+        ],
+        ("coding" | "código" | "codigo", Language::En) => &[
+            "Coding focus. Close Slack and ship the next change.",
+            "Editor and you. No distractions.",
+            "One clean coding session.",
+        ],
+        ("writing" | "escritura", Language::Es) => &[
+            "Sesión de escritura. Una idea a la vez.",
+            "Escribe sin editar. Editar es para después.",
+            "Una página, un borrador, un avance.",
+        ],
+        ("writing" | "escritura", Language::En) => &[
+            "Writing session. One idea at a time.",
+            "Write first, edit later.",
+            "One page, one draft, one step forward.",
+        ],
+        ("reading" | "lectura", Language::Es) => &[
+            "Sesión de lectura profunda. Sin tabs paralelas.",
+            "Lee con calma. Anota lo importante.",
+            "Una lectura, un highlight, una idea nueva.",
+        ],
+        ("reading" | "lectura", Language::En) => &[
+            "Deep reading session. No side tabs.",
+            "Read slowly. Note what matters.",
+            "One read, one highlight, one new idea.",
+        ],
+        ("deep work" | "trabajo profundo", Language::Es) => &[
+            "Trabajo profundo. Sin notificaciones, sin chats.",
+            "Una sesión sin interrupciones. Apaga lo que no necesites.",
+            "Foco profundo. Llega al estado de flow.",
+        ],
+        ("deep work" | "trabajo profundo", Language::En) => &[
+            "Deep work. No notifications, no chats.",
+            "One uninterrupted session. Mute what you can.",
+            "Deep focus. Reach the flow state.",
+        ],
+        _ => return None,
+    };
+    let seed = (hour as usize)
+        .wrapping_mul(31)
+        .wrapping_add(sessions_today as usize);
+    Some(pool[seed % pool.len()].to_string())
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -632,5 +698,52 @@ mod tests {
             }
         }
         let _ = sample_curated; // silence unused warning if tests evolve
+    }
+
+    /// v1.3 Wave A3 — when category="Coding" the SessionStart line
+    /// must mention coding (in either language).
+    #[test]
+    fn category_aware_session_start_es_coding() {
+        let mut ctx = ctx_at_hour(10, 0, Language::Es);
+        ctx.category = Some("Coding".to_string());
+        let s = coaching_curated(CoachingTrigger::SessionStart, &ctx);
+        assert!(
+            s.to_lowercase().contains("código") || s.to_lowercase().contains("editor") || s.to_lowercase().contains("slack"),
+            "expected ES coding-flavored line, got: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn category_aware_session_start_en_writing() {
+        let mut ctx = ctx_at_hour(15, 2, Language::En);
+        ctx.category = Some("Writing".to_string());
+        let s = coaching_curated(CoachingTrigger::SessionStart, &ctx);
+        assert!(
+            s.to_lowercase().contains("writ") || s.to_lowercase().contains("draft") || s.to_lowercase().contains("page"),
+            "expected EN writing-flavored line, got: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn category_unknown_falls_back_to_generic_pool() {
+        let mut ctx = ctx_at_hour(10, 0, Language::Es);
+        ctx.category = Some("RandomThing".to_string());
+        let s = coaching_curated(CoachingTrigger::SessionStart, &ctx);
+        // Should be from the generic morning-first pool (no coding/writing words).
+        assert!(!s.to_lowercase().contains("código"));
+        assert!(s.len() > 8);
+    }
+
+    /// Other triggers ignore category — SessionComplete should never
+    /// pull from the coding-flavored pool.
+    #[test]
+    fn category_only_overrides_session_start() {
+        let mut ctx = ctx_at_hour(10, 0, Language::Es);
+        ctx.category = Some("Coding".to_string());
+        let complete = coaching_curated(CoachingTrigger::SessionComplete, &ctx);
+        // SessionComplete pool has no coding-specific lines.
+        assert!(!complete.to_lowercase().contains("código"));
     }
 }
