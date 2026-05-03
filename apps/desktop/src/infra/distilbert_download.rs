@@ -14,11 +14,11 @@ use std::path::PathBuf;
 
 const MODEL_URL: &str =
     "https://huggingface.co/Xenova/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/onnx/model_quantized.onnx";
-const MODEL_SHA: &str = ""; // TODO v1.2.1: lock once we pick the canonical revision.
+const MODEL_SHA: &str = "79b45c7fd8c2673aa53615aba07caeb2de798f63a95a2393a365982429c94f7f";
 
 const TOKENIZER_URL: &str =
     "https://huggingface.co/Xenova/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/tokenizer.json";
-const TOKENIZER_SHA: &str = ""; // TODO v1.2.1.
+const TOKENIZER_SHA: &str = "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66";
 
 pub fn model_dir() -> PathBuf {
     OnnxClassifier::default_model_dir()

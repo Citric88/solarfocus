@@ -33,22 +33,22 @@ pub const MANIFESTS: &[ModelManifest] = &[
     ModelManifest {
         id: ModelChoice::SmolLM2,
         url: "https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF/resolve/main/smollm2-1.7b-instruct-q4_k_m.gguf",
-        sha256: "",
-        size_bytes: 1_055_000_000,
+        sha256: "decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33",
+        size_bytes: 1_055_609_536,
         filename: "smollm2-1.7b-instruct-q4_k_m.gguf",
     },
     ModelManifest {
         id: ModelChoice::Llama1B,
         url: "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-        sha256: "",
-        size_bytes: 770_000_000,
+        sha256: "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
+        size_bytes: 807_694_464,
         filename: "llama-3.2-1b-instruct-q4_k_m.gguf",
     },
     ModelManifest {
         id: ModelChoice::Qwen15,
         url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        sha256: "",
-        size_bytes: 935_000_000,
+        sha256: "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+        size_bytes: 1_117_320_736,
         filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf",
     },
 ];
