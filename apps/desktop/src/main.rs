@@ -69,6 +69,10 @@ pub enum Message {
     SetFocusMinutes(u32),
     SetBreakMinutes(u32),
     SetLongBreakMinutes(u32),
+    // v1.3 Wave A1 — free-form custom duration text inputs.
+    SetFocusMinutesText(String),
+    SetBreakMinutesText(String),
+    SetLongBreakMinutesText(String),
     ThumbsUp,
     ThumbsDown,
 
@@ -184,6 +188,14 @@ pub struct App {
     // FIX-3 (rc14) — show advanced (debug) controls in AI tab.
     // Ephemeral; not persisted.
     setup_show_advanced: bool,
+
+    // v1.3 Wave A1 — ephemeral text-input buffers for free-form custom
+    // durations. Initialized from settings on App::new(). When the user
+    // types a valid u32 in 1..=180, both the buffer and the persisted
+    // setting are updated.
+    custom_focus_str: String,
+    custom_break_str: String,
+    custom_long_break_str: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +357,11 @@ impl App {
             .as_ref()
             .and_then(|r| r.feedback_counts().ok())
             .unwrap_or((0, 0));
+        // v1.3 Wave A1 — capture initial duration strings before `settings`
+        // is moved into Self.
+        let custom_focus_str = settings.focus_minutes.to_string();
+        let custom_break_str = settings.break_minutes.to_string();
+        let custom_long_break_str = settings.long_break_minutes.to_string();
 
         (
             Self {
@@ -378,6 +395,9 @@ impl App {
                 setup_tab: SetupTab::default(),
                 wizard_step: WizardStep::Welcome,
                 setup_show_advanced: false,
+                custom_focus_str,
+                custom_break_str,
+                custom_long_break_str,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).
@@ -1056,8 +1076,9 @@ impl App {
                 Task::none()
             }
             Message::SetFocusMinutes(mins) => {
-                let mins = mins.clamp(1, 120);
+                let mins = mins.clamp(1, 180);
                 self.settings.focus_minutes = mins;
+                self.custom_focus_str = mins.to_string();
                 self.settings.save();
                 self.pomodoro_engine.config_mut().focus_duration = (mins as f32) * 60.0;
                 log::info!("Focus duration → {} min", mins);
@@ -1071,8 +1092,9 @@ impl App {
                 Task::none()
             }
             Message::SetBreakMinutes(mins) => {
-                let mins = mins.clamp(1, 60);
+                let mins = mins.clamp(1, 180);
                 self.settings.break_minutes = mins;
+                self.custom_break_str = mins.to_string();
                 self.settings.save();
                 self.pomodoro_engine.config_mut().short_break_duration = (mins as f32) * 60.0;
                 log::info!("Short break → {} min", mins);
@@ -1086,11 +1108,43 @@ impl App {
                 Task::none()
             }
             Message::SetLongBreakMinutes(mins) => {
-                let mins = mins.clamp(1, 120);
+                let mins = mins.clamp(1, 180);
                 self.settings.long_break_minutes = mins;
+                self.custom_long_break_str = mins.to_string();
                 self.settings.save();
                 self.pomodoro_engine.config_mut().long_break_duration = (mins as f32) * 60.0;
                 log::info!("Long break → {} min", mins);
+                Task::none()
+            }
+            // v1.3 Wave A1 — accept any keystroke into the buffer; if it
+            // parses to a u32 in 1..=180, apply immediately. Empty / out
+            // of range / non-numeric stays in the buffer but does not
+            // mutate the persisted setting.
+            Message::SetFocusMinutesText(s) => {
+                self.custom_focus_str = digits_only(&s, 3);
+                if let Some(m) = parse_minutes(&self.custom_focus_str, 1, 180) {
+                    self.settings.focus_minutes = m;
+                    self.settings.save();
+                    self.pomodoro_engine.config_mut().focus_duration = (m as f32) * 60.0;
+                }
+                Task::none()
+            }
+            Message::SetBreakMinutesText(s) => {
+                self.custom_break_str = digits_only(&s, 3);
+                if let Some(m) = parse_minutes(&self.custom_break_str, 1, 180) {
+                    self.settings.break_minutes = m;
+                    self.settings.save();
+                    self.pomodoro_engine.config_mut().short_break_duration = (m as f32) * 60.0;
+                }
+                Task::none()
+            }
+            Message::SetLongBreakMinutesText(s) => {
+                self.custom_long_break_str = digits_only(&s, 3);
+                if let Some(m) = parse_minutes(&self.custom_long_break_str, 1, 180) {
+                    self.settings.long_break_minutes = m;
+                    self.settings.save();
+                    self.pomodoro_engine.config_mut().long_break_duration = (m as f32) * 60.0;
+                }
                 Task::none()
             }
             Message::SetRamMode(mode) => {
@@ -2682,13 +2736,26 @@ impl App {
         let row_chips = |label: String,
                          opts: &[u32],
                          current: u32,
-                         msg: fn(u32) -> Message|
+                         msg: fn(u32) -> Message,
+                         input_buf: &str,
+                         text_msg: fn(String) -> Message,
+                         placeholder: &str|
          -> Element<'_, Message> {
             let mut row = iced::widget::Row::new();
             for &m in opts {
                 row = row.push(chip(format!("{}", m), current == m, msg(m)));
                 row = row.push(iced::widget::Space::with_width(SPACE_XS as f32));
             }
+            // v1.3 Wave A1 — inline custom-duration text input. Width
+            // calibrated for 3 digits + "min" suffix.
+            let input = iced::widget::text_input(placeholder, input_buf)
+                .on_input(text_msg)
+                .width(Length::Fixed(72.0))
+                .padding([4, 8])
+                .size(FONT_SMALL);
+            row = row.push(input);
+            row = row.push(iced::widget::Space::with_width(SPACE_XS as f32));
+            row = row.push(text("min").size(FONT_TINY).color(TEXT_MUTED));
             column![
                 text(label).size(FONT_SMALL).color(TEXT_MUTED),
                 row,
@@ -2717,6 +2784,9 @@ impl App {
                     &[1, 5, 15, 25, 50],
                     self.settings.focus_minutes,
                     Message::SetFocusMinutes,
+                    &self.custom_focus_str,
+                    Message::SetFocusMinutesText,
+                    "25",
                 ),
                 row_chips(
                     format!(
@@ -2730,6 +2800,9 @@ impl App {
                     &[1, 3, 5, 10, 15],
                     self.settings.break_minutes,
                     Message::SetBreakMinutes,
+                    &self.custom_break_str,
+                    Message::SetBreakMinutesText,
+                    "5",
                 ),
                 row_chips(
                     format!(
@@ -2743,12 +2816,15 @@ impl App {
                     &[5, 10, 15, 20, 30],
                     self.settings.long_break_minutes,
                     Message::SetLongBreakMinutes,
+                    &self.custom_long_break_str,
+                    Message::SetLongBreakMinutesText,
+                    "15",
                 ),
                 text(match self.settings.language {
                     Language::Es =>
-                        "Pomodoro clásico: 25 / 5 / 15 (después de 4 sesiones).",
+                        "Pomodoro clásico: 25 / 5 / 15 (después de 4 sesiones). El campo numérico acepta valores personalizados (1–180).",
                     Language::En =>
-                        "Classic Pomodoro: 25 / 5 / 15 (after 4 sessions).",
+                        "Classic Pomodoro: 25 / 5 / 15 (after 4 sessions). The numeric field accepts custom values (1–180).",
                 })
                 .size(FONT_TINY)
                 .color(TEXT_MUTED),
@@ -3945,6 +4021,56 @@ fn on_off(b: bool) -> &'static str {
         "ON"
     } else {
         "OFF"
+    }
+}
+
+// v1.3 Wave A1 — strip non-digits and cap length so the input stays a
+// well-behaved numeric field even if the user pastes garbage.
+fn digits_only(s: &str, max_len: usize) -> String {
+    s.chars().filter(|c| c.is_ascii_digit()).take(max_len).collect()
+}
+
+// Parse a digit string into a u32, returning None if outside [min, max].
+fn parse_minutes(s: &str, min: u32, max: u32) -> Option<u32> {
+    s.parse::<u32>().ok().filter(|m| (min..=max).contains(m))
+}
+
+#[cfg(test)]
+mod custom_duration_tests {
+    use super::{digits_only, parse_minutes};
+
+    #[test]
+    fn digits_only_strips_letters_and_symbols() {
+        assert_eq!(digits_only("a1b2c3!@#", 10), "123");
+        assert_eq!(digits_only("", 10), "");
+        assert_eq!(digits_only("abc", 10), "");
+    }
+
+    #[test]
+    fn digits_only_caps_length() {
+        assert_eq!(digits_only("12345", 3), "123");
+        assert_eq!(digits_only("9999", 4), "9999");
+    }
+
+    #[test]
+    fn parse_minutes_in_range() {
+        assert_eq!(parse_minutes("1", 1, 180), Some(1));
+        assert_eq!(parse_minutes("25", 1, 180), Some(25));
+        assert_eq!(parse_minutes("180", 1, 180), Some(180));
+    }
+
+    #[test]
+    fn parse_minutes_rejects_out_of_range() {
+        assert_eq!(parse_minutes("0", 1, 180), None);
+        assert_eq!(parse_minutes("181", 1, 180), None);
+        assert_eq!(parse_minutes("9999", 1, 180), None);
+    }
+
+    #[test]
+    fn parse_minutes_rejects_garbage() {
+        assert_eq!(parse_minutes("", 1, 180), None);
+        assert_eq!(parse_minutes("abc", 1, 180), None);
+        assert_eq!(parse_minutes("-5", 1, 180), None);
     }
 }
 

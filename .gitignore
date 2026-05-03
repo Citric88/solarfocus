@@ -14,3 +14,4 @@
 # Local SQLite DB created at runtime
 data/
 logs/
+target 2/
