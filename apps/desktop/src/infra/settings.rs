@@ -120,6 +120,19 @@ pub struct Settings {
     // value used by v1.2 rows after migration.
     #[serde(default = "default_category")]
     pub last_category: String,
+
+    // v1.3 Wave B — camera-based presence detection. Off by default
+    // because it needs Camera permission and we want explicit opt-in.
+    #[serde(default)]
+    pub presence_enabled: bool,
+    /// Consecutive Absent samples (1 sample/sec) before auto-pausing
+    /// the focus session. 3 = ≈3 seconds.
+    #[serde(default = "default_absent_threshold")]
+    pub presence_absent_threshold: u8,
+}
+
+fn default_absent_threshold() -> u8 {
+    3
 }
 
 fn default_category() -> String {
@@ -177,6 +190,8 @@ impl Default for Settings {
             break_minutes: 5,
             long_break_minutes: 15,
             last_category: default_category(),
+            presence_enabled: false,
+            presence_absent_threshold: default_absent_threshold(),
         }
     }
 }

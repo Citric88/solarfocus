@@ -76,6 +76,13 @@ pub enum Message {
     // v1.3 Wave A2 — named focus category for the next session.
     SetCategory(String),
     SetCategoryText(String),
+    // v1.3 Wave B — camera-based presence detection (feature-gated).
+    #[cfg(feature = "presence")]
+    TogglePresence(bool),
+    #[cfg(feature = "presence")]
+    PresenceProbe,
+    #[cfg(feature = "presence")]
+    PresenceReady(Result<infra::presence::PresenceSample, String>),
     ThumbsUp,
     ThumbsDown,
 
@@ -203,6 +210,18 @@ pub struct App {
     // Mirrors settings.last_category and is only re-applied to settings
     // when non-empty after trim.
     custom_category_str: String,
+
+    // v1.3 Wave B — camera presence probe (lazy init on first toggle).
+    // Wrapped in Arc<Mutex<>> because PresenceProbe is Send+Sync but
+    // mutable internally; spawn_blocking captures it.
+    #[cfg(feature = "presence")]
+    presence_probe: Option<std::sync::Arc<infra::presence::PresenceProbe>>,
+    #[cfg(feature = "presence")]
+    consecutive_absent_samples: u8,
+    #[cfg(feature = "presence")]
+    last_presence: Option<infra::presence::Presence>,
+    #[cfg(feature = "presence")]
+    presence_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +426,14 @@ impl App {
                 custom_break_str,
                 custom_long_break_str,
                 custom_category_str,
+                #[cfg(feature = "presence")]
+                presence_probe: None,
+                #[cfg(feature = "presence")]
+                consecutive_absent_samples: 0,
+                #[cfg(feature = "presence")]
+                last_presence: None,
+                #[cfg(feature = "presence")]
+                presence_error: None,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).
@@ -676,6 +703,20 @@ impl App {
             let secs = self.settings.window_poll_secs.max(1) as u64;
             subs.push(
                 iced::time::every(Duration::from_secs(secs)).map(|_| Message::WindowProbe),
+            );
+        }
+
+        // v1.3 Wave B — presence probe ticks once per second while a focus
+        // session is active and the user has opted in.
+        #[cfg(feature = "presence")]
+        if self.settings.presence_enabled
+            && matches!(
+                self.pomodoro_engine.state(),
+                SolarFocusCore::AppState::Focusing(_)
+            )
+        {
+            subs.push(
+                iced::time::every(Duration::from_secs(1)).map(|_| Message::PresenceProbe),
             );
         }
 
@@ -1176,6 +1217,96 @@ impl App {
                 if !trimmed.trim().is_empty() {
                     self.settings.last_category = trimmed.trim().to_string();
                     self.settings.save();
+                }
+                Task::none()
+            }
+            // v1.3 Wave B — toggle the presence probe. First enable opens
+            // the camera (triggers macOS Camera permission prompt). On
+            // failure we save the error string for the UI to surface.
+            #[cfg(feature = "presence")]
+            Message::TogglePresence(on) => {
+                self.settings.presence_enabled = on;
+                self.settings.save();
+                self.presence_error = None;
+                if on {
+                    if self.presence_probe.is_none() {
+                        match infra::presence::PresenceProbe::new() {
+                            Ok(p) => {
+                                self.presence_probe = Some(std::sync::Arc::new(p));
+                                log::info!("Presence: probe initialized");
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                log::warn!("Presence: init failed: {}", msg);
+                                self.presence_error = Some(msg);
+                                self.settings.presence_enabled = false;
+                                self.settings.save();
+                            }
+                        }
+                    }
+                } else {
+                    self.presence_probe = None;
+                    self.last_presence = None;
+                    self.consecutive_absent_samples = 0;
+                }
+                Task::none()
+            }
+            #[cfg(feature = "presence")]
+            Message::PresenceProbe => {
+                // Poll synchronously — capture + brightness mean takes
+                // <30 ms on M-series, fast enough for the UI thread at
+                // 1 Hz. Avoids Send bounds on macOS Camera handles.
+                if let Some(probe) = self.presence_probe.as_ref() {
+                    let result = probe.poll().map_err(|e| e.to_string());
+                    Task::done(Message::PresenceReady(result))
+                } else {
+                    Task::none()
+                }
+            }
+            #[cfg(feature = "presence")]
+            Message::PresenceReady(result) => {
+                use infra::presence::Presence;
+                match result {
+                    Ok(sample) => {
+                        self.last_presence = Some(sample.presence);
+                        self.presence_error = None;
+                        match sample.presence {
+                            Presence::Absent => {
+                                self.consecutive_absent_samples =
+                                    self.consecutive_absent_samples.saturating_add(1);
+                                let threshold = self.settings.presence_absent_threshold.max(1);
+                                if self.consecutive_absent_samples >= threshold
+                                    && matches!(
+                                        self.pomodoro_engine.state(),
+                                        SolarFocusCore::AppState::Focusing(_)
+                                    )
+                                    && !self.pomodoro_engine.is_paused()
+                                {
+                                    self.pomodoro_engine.pause(0.0);
+                                    log::info!(
+                                        "Presence: auto-paused after {} Absent samples",
+                                        self.consecutive_absent_samples
+                                    );
+                                    self.toast = Some(Toast {
+                                        text: match self.settings.language {
+                                            Language::Es =>
+                                                "Pausado: te alejaste del escritorio.".to_string(),
+                                            Language::En =>
+                                                "Paused: you stepped away.".to_string(),
+                                        },
+                                        expires_at: Instant::now() + Duration::from_secs(4),
+                                    });
+                                }
+                            }
+                            Presence::Present | Presence::Unknown => {
+                                self.consecutive_absent_samples = 0;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Presence: probe error: {}", e);
+                        self.presence_error = Some(e);
+                    }
                 }
                 Task::none()
             }
@@ -3338,9 +3469,94 @@ impl App {
             ..Default::default()
         });
 
-        column![banner, perm, transparency, danger_zone]
-            .spacing(SPACE_MD as u16)
-            .into()
+        // v1.3 Wave B — Privacy transparency for camera presence detection.
+        // Only rendered when the `presence` cargo feature is compiled in,
+        // because the user wouldn't otherwise have a way to enable it.
+        #[cfg(feature = "presence")]
+        let presence_transparency: Element<'_, Message> = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "¿Cómo funciona la detección de presencia?",
+                    Language::En => "How does presence detection work?",
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es => "Cuando la activas en Setup → IA, SolarFocus OS pide \
+                                     permiso de Cámara. Una vez al segundo durante una \
+                                     sesión de foco activa:",
+                    Language::En => "When you turn it on in Setup → AI, SolarFocus OS \
+                                     requests Camera permission. Once per second during \
+                                     an active focus session:",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                text(match self.settings.language {
+                    Language::Es => "  ·  Captura un frame en escala de grises (320×240).",
+                    Language::En => "  ·  Captures one grayscale frame (320×240).",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es => "  ·  Calcula la luminancia promedio del frame.",
+                    Language::En => "  ·  Computes the frame's average luminance.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es => "  ·  Compara contra el frame anterior. Si la luz cambia \
+                                     bruscamente (te alejaste, apagaste la luz), marca \
+                                     'Ausente'. El frame se descarta inmediatamente.",
+                    Language::En => "  ·  Compares against the previous frame. A sharp \
+                                     swing (you stepped away, lights off) flags 'Absent'. \
+                                     The frame is dropped immediately.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                text(match self.settings.language {
+                    Language::Es => "Tras 3 muestras consecutivas marcadas 'Ausente', \
+                                     la sesión se pausa automáticamente.",
+                    Language::En => "After 3 consecutive 'Absent' samples, the session \
+                                     auto-pauses.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                text(match self.settings.language {
+                    Language::Es => "Lo que NO hacemos: grabar video, guardar imágenes, \
+                                     hacer reconocimiento facial, identificar personas, \
+                                     ni enviar nada por la red. La cámara solo se enciende \
+                                     mientras una sesión está activa y la opción está activada.",
+                    Language::En => "What we DO NOT do: record video, save images, do \
+                                     facial recognition, identify people, or send anything \
+                                     over the network. The camera only turns on while a \
+                                     session is active and the option is enabled.",
+                })
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into();
+
+        let mut col = iced::widget::Column::new().spacing(SPACE_MD as u16);
+        col = col.push(banner).push(perm).push(transparency);
+        #[cfg(feature = "presence")]
+        {
+            col = col.push(presence_transparency);
+        }
+        col = col.push(danger_zone);
+        col.into()
     }
 
     fn view_setup_about(&self) -> Element<'_, Message> {
@@ -4035,17 +4251,89 @@ impl App {
                 .into()
         };
 
-        let content = column![
-            ai_toggle_card,
-            watch_toggle_card,
-            model_picker_card,
-            model_status_card,
-            classifier_card,
-            distilbert_card,
-            advanced_card,
-        ]
-        .spacing(SPACE_MD as u16)
-        .max_width(640);
+        // v1.3 Wave B — presence detection card (only shown when the
+        // `presence` cargo feature is compiled in).
+        #[cfg(feature = "presence")]
+        let presence_card: Element<'_, Message> = {
+            let body: Element<'_, Message> = if let Some(err) = &self.presence_error {
+                column![
+                    text(pick(
+                        "No se pudo iniciar la cámara.",
+                        "Camera initialization failed.",
+                    ))
+                    .size(FONT_BODY)
+                    .color(DANGER),
+                    text(err.clone()).size(FONT_TINY).color(TEXT_MUTED),
+                    chip_local(
+                        pick("Reintentar", "Retry").to_string(),
+                        false,
+                        Message::TogglePresence(true),
+                    ),
+                ]
+                .spacing(SPACE_SM as u16)
+                .into()
+            } else {
+                let status_label: String = match self.last_presence {
+                    Some(infra::presence::Presence::Present) => pick("Presente", "Present").to_string(),
+                    Some(infra::presence::Presence::Absent) => pick("Ausente", "Absent").to_string(),
+                    Some(infra::presence::Presence::Unknown) | None => {
+                        pick("—", "—").to_string()
+                    }
+                };
+                column![
+                    iced::widget::row![
+                        text(if self.settings.presence_enabled {
+                            pick("Activada", "Enabled")
+                        } else {
+                            pick("Desactivada", "Disabled")
+                        })
+                        .size(FONT_BODY)
+                        .color(TEXT_PRIMARY),
+                        iced::widget::horizontal_space(),
+                        chip_local(
+                            if self.settings.presence_enabled {
+                                pick("Desactivar", "Disable").to_string()
+                            } else {
+                                pick("Activar", "Enable").to_string()
+                            },
+                            false,
+                            Message::TogglePresence(!self.settings.presence_enabled),
+                        ),
+                    ],
+                    text(format!(
+                        "{}: {}",
+                        pick("Estado", "Status"),
+                        status_label
+                    ))
+                    .size(FONT_TINY)
+                    .color(TEXT_MUTED),
+                    text(pick(
+                        "v1.3.0 usa un detector por luminosidad (cambios bruscos = ausente). v1.3.1 añadirá detección facial con YuNet ONNX.",
+                        "v1.3.0 uses a brightness-change detector (sharp swings = absent). v1.3.1 will add YuNet ONNX face detection.",
+                    ))
+                    .size(FONT_TINY)
+                    .color(TEXT_MUTED),
+                ]
+                .spacing(SPACE_SM as u16)
+                .into()
+            };
+            settings_card_local(pick("Detección de presencia", "Presence detection"), body)
+        };
+
+        let mut card_col = iced::widget::Column::new().spacing(SPACE_MD as u16);
+        card_col = card_col
+            .push(ai_toggle_card)
+            .push(watch_toggle_card)
+            .push(model_picker_card)
+            .push(model_status_card)
+            .push(classifier_card)
+            .push(distilbert_card);
+        #[cfg(feature = "presence")]
+        {
+            card_col = card_col.push(presence_card);
+        }
+        card_col = card_col.push(advanced_card);
+        let content = card_col.max_width(640);
 
         // FIX-A (rc15): no outer background or padding — parent
         // view_setup_tabs already provides BG + canvas padding.

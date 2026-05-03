@@ -33,6 +33,10 @@ pub mod onnx_classifier;
 #[cfg(feature = "classifier")]
 pub mod distilbert_download;
 
+// 📷 v1.3 Wave B: camera-based presence detection (feature-gated).
+#[cfg(feature = "presence")]
+pub mod presence;
+
 use chrono::Utc;
 
 /// Inicializa el logger global con stdout + archivo
