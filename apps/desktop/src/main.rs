@@ -3002,7 +3002,12 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(720);
 
-        container(body)
+        // v1.3 rc5 — wrap the Setup body in a scrollable so the AI tab
+        // (which now has 7+ cards including the new Detección de
+        // presencia) remains reachable on shorter windows. The body
+        // column is Length::Shrink by default, so it satisfies the
+        // scrollable child contract that bit us in v1.2.
+        container(iced::widget::scrollable(body))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
