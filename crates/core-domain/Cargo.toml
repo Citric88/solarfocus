@@ -1,0 +1,11 @@
+[package]
+name = "solar-focus-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["SolarFocus Team"]
+
+# 🚫 Sin dependencias externas - Lógica pura del dominio
+# Solo usa librerías estándar de Rust (std) + serde para serialización
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
