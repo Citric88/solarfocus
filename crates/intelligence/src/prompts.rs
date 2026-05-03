@@ -311,6 +311,15 @@ pub fn looks_coherent(s: &str, lang: Language) -> bool {
     if s.len() < 8 || s.len() > 220 {
         return false;
     }
+    // v1.3 rc6 — reject any string containing the Unicode REPLACEMENT
+    // CHARACTER (U+FFFD). It surfaces as a tofu glyph and is the most
+    // visible failure mode of SmolLM2 outputting bytes the font can't
+    // render. Live testing of v1.3.0-rc4/rc5 caught
+    // "��Felicidades…" and "��Buenas noches!" passing the older
+    // semantic checks.
+    if s.contains('\u{FFFD}') {
+        return false;
+    }
     let lower = s.to_ascii_lowercase();
     // Reject if it echoes the prompt scaffolding
     let bad_substrings = [
@@ -734,6 +743,16 @@ mod tests {
         // Should be from the generic morning-first pool (no coding/writing words).
         assert!(!s.to_lowercase().contains("código"));
         assert!(s.len() > 8);
+    }
+
+    /// v1.3 rc6 — strings containing U+FFFD must be rejected so the
+    /// coach falls back to the curated bank instead of showing tofu.
+    #[test]
+    fn looks_coherent_rejects_replacement_char() {
+        let bad = "\u{FFFD}Buenas noches! Espero que estés enfocado.";
+        assert!(!looks_coherent(bad, Language::Es));
+        let good = "¡Buenas noches! Espero que estés enfocado.";
+        assert!(looks_coherent(good, Language::Es));
     }
 
     /// Other triggers ignore category — SessionComplete should never
