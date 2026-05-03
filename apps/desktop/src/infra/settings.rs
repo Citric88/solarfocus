@@ -106,6 +106,14 @@ pub struct Settings {
     // UI-4 — true on a brand-new install. Wizard sets to false on completion.
     #[serde(default = "default_first_run")]
     pub first_run: bool,
+
+    // FEAT — user-configurable focus duration in minutes. Default 25 (classic Pomodoro).
+    #[serde(default = "default_focus_minutes")]
+    pub focus_minutes: u32,
+}
+
+fn default_focus_minutes() -> u32 {
+    25
 }
 
 fn default_first_run() -> bool {
@@ -145,6 +153,7 @@ impl Default for Settings {
             model_download_skipped: false,
             ram_mode: RamMode::default(),
             first_run: true,
+            focus_minutes: 25,
         }
     }
 }

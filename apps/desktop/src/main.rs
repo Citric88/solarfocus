@@ -65,6 +65,7 @@ pub enum Message {
     // Phase 4 — model picker + thumbs feedback + RAM mode
     SetModelChoice(infra::settings::ModelChoice),
     SetRamMode(infra::settings::RamMode),
+    SetFocusMinutes(u32),
     ThumbsUp,
     ThumbsDown,
 
@@ -250,7 +251,7 @@ impl Default for PermissionStatus {
 
 impl App {
     pub fn new() -> (Self, Task<Message>) {
-        let engine = SolarFocusCore::PomodoroEngine::new();
+        let mut engine = SolarFocusCore::PomodoroEngine::new();
         let session_repo = match SessionRepository::new() {
             Ok(r) => Some(r),
             Err(e) => {
@@ -269,6 +270,9 @@ impl App {
             settings.classifier_mode = ClassifierMode::Rules;
             settings.save();
         }
+
+        // FEAT — apply user's saved focus duration (default 25 min).
+        engine.config_mut().focus_duration = (settings.focus_minutes as f32) * 60.0;
 
         let coach = build_coach(&settings);
         let summarizer = build_summarizer(&settings);
@@ -997,6 +1001,21 @@ impl App {
                         expires_at: Instant::now() + Duration::from_secs(5),
                     });
                 }
+                Task::none()
+            }
+            Message::SetFocusMinutes(mins) => {
+                let mins = mins.clamp(1, 120);
+                self.settings.focus_minutes = mins;
+                self.settings.save();
+                self.pomodoro_engine.config_mut().focus_duration = (mins as f32) * 60.0;
+                log::info!("Focus duration → {} min", mins);
+                self.toast = Some(Toast {
+                    text: match self.settings.language {
+                        Language::Es => format!("Duración: {} min", mins),
+                        Language::En => format!("Duration: {} min", mins),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(2),
+                });
                 Task::none()
             }
             Message::SetRamMode(mode) => {
@@ -2170,6 +2189,71 @@ impl App {
             ..Default::default()
         });
 
+        // FEAT — focus duration quick-pick chips.
+        let chip = |mins: u32| -> Element<'_, Message> {
+            let selected = self.settings.focus_minutes == mins;
+            iced::widget::button(text(format!("{} min", mins)).size(FONT_SMALL).color(BG))
+                .on_press(Message::SetFocusMinutes(mins))
+                .padding([6, 14])
+                .style(move |_, _| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(if selected {
+                        ACCENT
+                    } else {
+                        SURFACE_RAISED
+                    })),
+                    text_color: if selected { BG } else { TEXT_PRIMARY },
+                    border: iced::Border {
+                        radius: 6.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
+        let duration_card = container(
+            column![
+                text(format!(
+                    "{} ({} min)",
+                    match self.settings.language {
+                        Language::Es => "Duración del foco",
+                        Language::En => "Focus duration",
+                    },
+                    self.settings.focus_minutes
+                ))
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                iced::widget::row![
+                    chip(1),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    chip(5),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    chip(15),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    chip(25),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    chip(50),
+                ],
+                text(match self.settings.language {
+                    Language::Es =>
+                        "1 min para pruebas; 25 min es el clásico de Pomodoro.",
+                    Language::En =>
+                        "1 min for testing; 25 min is the classic Pomodoro.",
+                })
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
         let shortcuts = container(
             column![
                 text(match self.settings.language {
@@ -2200,7 +2284,7 @@ impl App {
             ..Default::default()
         });
 
-        column![lang_card, ram_card, shortcuts]
+        column![lang_card, duration_card, ram_card, shortcuts]
             .spacing(SPACE_MD as u16)
             .into()
     }
