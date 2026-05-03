@@ -66,6 +66,8 @@ pub enum Message {
     SetModelChoice(infra::settings::ModelChoice),
     SetRamMode(infra::settings::RamMode),
     SetFocusMinutes(u32),
+    SetBreakMinutes(u32),
+    SetLongBreakMinutes(u32),
     ThumbsUp,
     ThumbsDown,
 
@@ -271,8 +273,10 @@ impl App {
             settings.save();
         }
 
-        // FEAT — apply user's saved focus duration (default 25 min).
+        // FEAT — apply user's saved focus + break durations.
         engine.config_mut().focus_duration = (settings.focus_minutes as f32) * 60.0;
+        engine.config_mut().short_break_duration = (settings.break_minutes as f32) * 60.0;
+        engine.config_mut().long_break_duration = (settings.long_break_minutes as f32) * 60.0;
 
         let coach = build_coach(&settings);
         let summarizer = build_summarizer(&settings);
@@ -577,12 +581,32 @@ impl App {
     }
 
     fn focus_context(&self) -> FocusContext {
+        use chrono::{Datelike, Local, Timelike};
+        let now = Local::now();
+        let weekday = now.weekday().num_days_from_monday() as u8;
+        let focus_minutes_7d = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.weekly_focus_seconds().ok())
+            .map(|days| days.iter().map(|(_, s)| *s).sum::<u32>() / 60)
+            .unwrap_or(0);
+        let last_distraction = self
+            .last_classification
+            .as_ref()
+            .and_then(|c| c.matched_rule.clone())
+            .and_then(|rule| rule.split(':').nth(1).map(|s| s.to_string()));
+
         FocusContext {
             sessions_today: self.sessions_today,
             streak: self.pomodoro_engine.sessions_completed(),
             xp_today: 0, // wired in Phase 4 alongside RewardsSystem
             focus_duration_secs: self.pomodoro_engine.config().focus_duration as u32,
             language: self.settings.language,
+            hour_of_day: now.hour() as u8,
+            weekday,
+            distractions_today: self.distractions_today,
+            focus_minutes_7d,
+            last_distraction,
         }
     }
 
@@ -643,6 +667,9 @@ impl App {
                 Key::Character("2") => Some(Message::SwitchRoute(Route::Stats)),
                 Key::Character("3") => Some(Message::SwitchRoute(Route::Coach)),
                 Key::Character("4") => Some(Message::SwitchRoute(Route::Setup)),
+                Key::Character("5") | Key::Character("?") => {
+                    Some(Message::SwitchRoute(Route::Help))
+                }
                 _ => None,
             }
         }));
@@ -1011,11 +1038,34 @@ impl App {
                 log::info!("Focus duration → {} min", mins);
                 self.toast = Some(Toast {
                     text: match self.settings.language {
-                        Language::Es => format!("Duración: {} min", mins),
-                        Language::En => format!("Duration: {} min", mins),
+                        Language::Es => format!("Foco: {} min", mins),
+                        Language::En => format!("Focus: {} min", mins),
                     },
                     expires_at: Instant::now() + Duration::from_secs(2),
                 });
+                Task::none()
+            }
+            Message::SetBreakMinutes(mins) => {
+                let mins = mins.clamp(1, 60);
+                self.settings.break_minutes = mins;
+                self.settings.save();
+                self.pomodoro_engine.config_mut().short_break_duration = (mins as f32) * 60.0;
+                log::info!("Short break → {} min", mins);
+                self.toast = Some(Toast {
+                    text: match self.settings.language {
+                        Language::Es => format!("Pausa: {} min", mins),
+                        Language::En => format!("Break: {} min", mins),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(2),
+                });
+                Task::none()
+            }
+            Message::SetLongBreakMinutes(mins) => {
+                let mins = mins.clamp(1, 120);
+                self.settings.long_break_minutes = mins;
+                self.settings.save();
+                self.pomodoro_engine.config_mut().long_break_duration = (mins as f32) * 60.0;
+                log::info!("Long break → {} min", mins);
                 Task::none()
             }
             Message::SetRamMode(mode) => {
@@ -1344,6 +1394,7 @@ impl App {
             Route::Stats => self.view_stats_placeholder(),
             Route::Coach => self.view_coach_placeholder(),
             Route::Setup => self.view_setup_tabs(),
+            Route::Help => self.view_help(),
         };
 
         iced::widget::row![sidebar, canvas].into()
@@ -1719,6 +1770,151 @@ impl App {
 
     /// UI-3: Coach canvas — model badge + most recent coaching message
     /// (large) with ghost thumbs + scrolling history of past feedback.
+    /// FEAT — Help / "What does this app do?" canvas. Reachable from
+    /// the sidebar's 5th icon or via the `?` / `5` keyboard shortcut.
+    fn view_help(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+
+        let lang = self.settings.language;
+
+        let title = text(match lang {
+            Language::Es => "¿Qué es SolarFocus?",
+            Language::En => "What is SolarFocus?",
+        })
+        .size(FONT_TITLE)
+        .color(TEXT_PRIMARY);
+
+        let pitch = text(match lang {
+            Language::Es =>
+                "Un cronómetro Pomodoro con coach de IA local. Todo el procesamiento ocurre en tu equipo: \
+                 sin nube, sin telemetría, sin cuenta. Diseñado para concentrarte sin sacrificar tu privacidad.",
+            Language::En =>
+                "A Pomodoro timer with a local AI coach. Everything runs on your machine: \
+                 no cloud, no telemetry, no account. Designed to help you focus without sacrificing privacy.",
+        })
+        .size(FONT_BODY)
+        .color(TEXT_SECONDARY);
+
+        let feature = |num: &'static str, title_str: String, desc_str: String| -> Element<'_, Message> {
+            container(
+                iced::widget::row![
+                    text(num.to_string())
+                        .size(FONT_LEAD)
+                        .color(ACCENT),
+                    iced::widget::Space::with_width(SPACE_MD as f32),
+                    column![
+                        text(title_str).size(FONT_BODY).color(TEXT_PRIMARY),
+                        text(desc_str).size(FONT_SMALL).color(TEXT_SECONDARY),
+                    ]
+                    .spacing(2),
+                ]
+                .padding(SPACE_SM as u16),
+            )
+            .padding(SPACE_SM as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        let pick = |es: &str, en: &str| -> String {
+            if lang == Language::Es { es.to_string() } else { en.to_string() }
+        };
+
+        let features = column![
+            feature("1.", pick("Cronómetro Pomodoro", "Pomodoro timer"),
+                pick("Sesiones de foco + pausas configurables (Setup → General).",
+                     "Configurable focus + break durations (Setup → General).")),
+            feature("2.", pick("Detección de distracciones", "Distraction detection"),
+                pick("Vigila la ventana activa y avisa cuando te alejas del trabajo.",
+                     "Watches the active window and alerts when you drift off-task.")),
+            feature("3.", pick("Coach IA local", "Local AI coach"),
+                pick("Mensajes personalizados al iniciar, terminar o pausar sesiones.",
+                     "Personalized messages at session start, end, and pauses.")),
+            feature("4.", pick("Resumen diario", "Daily recap"),
+                pick("Cada día genera un resumen con tus números reales (Stats).",
+                     "Generates a daily summary from your actual numbers (Stats).")),
+            feature("5.", pick("Estadísticas", "Stats"),
+                pick("Sesiones, distracciones, gráfica semanal, totales históricos.",
+                     "Sessions, distractions, weekly chart, lifetime totals.")),
+        ]
+        .spacing(SPACE_SM as u16);
+
+        let shortcuts = container(
+            column![
+                text(match lang {
+                    Language::Es => "Atajos de teclado",
+                    Language::En => "Keyboard shortcuts",
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                text("Space / P  ·  Pausar  /  Pause").size(FONT_SMALL).color(TEXT_SECONDARY),
+                text("R  ·  Reanudar  /  Resume").size(FONT_SMALL).color(TEXT_SECONDARY),
+                text("B  ·  Tomar descanso  /  Take break").size(FONT_SMALL).color(TEXT_SECONDARY),
+                text("S  ·  Setup").size(FONT_SMALL).color(TEXT_SECONDARY),
+                text("?  /  5  ·  Help").size(FONT_SMALL).color(TEXT_SECONDARY),
+                text("1 / 2 / 3 / 4  ·  Cambiar de pestaña / Switch tab").size(FONT_SMALL).color(TEXT_SECONDARY),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border { radius: 6.0.into(), ..Default::default() },
+            ..Default::default()
+        });
+
+        let model_state = if cfg!(feature = "llm") {
+            match (self.settings.ai_enabled, self.coach.is_ready()) {
+                (true, true) => format!(
+                    "{}: {:?} ({})",
+                    match lang { Language::Es => "Coach IA activo", Language::En => "AI coach active" },
+                    self.settings.model_choice,
+                    if self.model_present_cache.unwrap_or(false) {
+                        match lang { Language::Es => "modelo en disco", Language::En => "model on disk" }
+                    } else {
+                        match lang { Language::Es => "esperando descarga", Language::En => "awaiting download" }
+                    }
+                ),
+                _ => match lang {
+                    Language::Es => "Coach IA desactivado".to_string(),
+                    Language::En => "AI coach disabled".to_string(),
+                },
+            }
+        } else {
+            match lang {
+                Language::Es => "Build sin LLM (recompila con --features llm)".to_string(),
+                Language::En => "Build without LLM (rebuild with --features llm)".to_string(),
+            }
+        };
+        let status = container(text(model_state).size(FONT_SMALL).color(TEXT_PRIMARY))
+            .padding(SPACE_SM as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                ..Default::default()
+            });
+
+        let body = column![title, pitch, status, features, shortcuts]
+            .spacing(SPACE_LG as u16)
+            .padding(SPACE_XL as u16)
+            .max_width(720);
+
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
+                ..Default::default()
+            })
+            .into()
+    }
+
     fn view_coach_placeholder(&self) -> Element<'_, Message> {
         use ui::palette::*;
 
@@ -2189,11 +2385,13 @@ impl App {
             ..Default::default()
         });
 
-        // FEAT — focus duration quick-pick chips.
-        let chip = |mins: u32| -> Element<'_, Message> {
-            let selected = self.settings.focus_minutes == mins;
-            iced::widget::button(text(format!("{} min", mins)).size(FONT_SMALL).color(BG))
-                .on_press(Message::SetFocusMinutes(mins))
+        // FEAT — chip helper that takes selected predicate + on-press builder.
+        let chip = |label: String,
+                    selected: bool,
+                    msg: Message|
+         -> Element<'_, Message> {
+            iced::widget::button(text(label).size(FONT_SMALL).color(BG))
+                .on_press(msg)
                 .padding([6, 14])
                 .style(move |_, _| iced::widget::button::Style {
                     background: Some(iced::Background::Color(if selected {
@@ -2210,34 +2408,76 @@ impl App {
                 })
                 .into()
         };
+        let row_chips = |label: String,
+                         opts: &[u32],
+                         current: u32,
+                         msg: fn(u32) -> Message|
+         -> Element<'_, Message> {
+            let mut row = iced::widget::Row::new();
+            for &m in opts {
+                row = row.push(chip(format!("{}", m), current == m, msg(m)));
+                row = row.push(iced::widget::Space::with_width(SPACE_XS as f32));
+            }
+            column![
+                text(label).size(FONT_SMALL).color(TEXT_MUTED),
+                row,
+            ]
+            .spacing(4)
+            .into()
+        };
+
         let duration_card = container(
             column![
-                text(format!(
-                    "{} ({} min)",
-                    match self.settings.language {
-                        Language::Es => "Duración del foco",
-                        Language::En => "Focus duration",
-                    },
-                    self.settings.focus_minutes
-                ))
-                .size(FONT_SMALL)
-                .color(TEXT_MUTED),
-                iced::widget::row![
-                    chip(1),
-                    iced::widget::Space::with_width(SPACE_XS as f32),
-                    chip(5),
-                    iced::widget::Space::with_width(SPACE_XS as f32),
-                    chip(15),
-                    iced::widget::Space::with_width(SPACE_XS as f32),
-                    chip(25),
-                    iced::widget::Space::with_width(SPACE_XS as f32),
-                    chip(50),
-                ],
+                text(match self.settings.language {
+                    Language::Es => "Duraciones",
+                    Language::En => "Durations",
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                row_chips(
+                    format!(
+                        "{} · {} min",
+                        match self.settings.language {
+                            Language::Es => "Foco",
+                            Language::En => "Focus",
+                        },
+                        self.settings.focus_minutes,
+                    ),
+                    &[1, 5, 15, 25, 50],
+                    self.settings.focus_minutes,
+                    Message::SetFocusMinutes,
+                ),
+                row_chips(
+                    format!(
+                        "{} · {} min",
+                        match self.settings.language {
+                            Language::Es => "Pausa corta",
+                            Language::En => "Short break",
+                        },
+                        self.settings.break_minutes,
+                    ),
+                    &[1, 3, 5, 10, 15],
+                    self.settings.break_minutes,
+                    Message::SetBreakMinutes,
+                ),
+                row_chips(
+                    format!(
+                        "{} · {} min",
+                        match self.settings.language {
+                            Language::Es => "Pausa larga",
+                            Language::En => "Long break",
+                        },
+                        self.settings.long_break_minutes,
+                    ),
+                    &[5, 10, 15, 20, 30],
+                    self.settings.long_break_minutes,
+                    Message::SetLongBreakMinutes,
+                ),
                 text(match self.settings.language {
                     Language::Es =>
-                        "1 min para pruebas; 25 min es el clásico de Pomodoro.",
+                        "Pomodoro clásico: 25 / 5 / 15 (después de 4 sesiones).",
                     Language::En =>
-                        "1 min for testing; 25 min is the classic Pomodoro.",
+                        "Classic Pomodoro: 25 / 5 / 15 (after 4 sessions).",
                 })
                 .size(FONT_TINY)
                 .color(TEXT_MUTED),

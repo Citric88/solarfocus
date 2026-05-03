@@ -30,6 +30,23 @@ pub struct FocusContext {
     pub xp_today: u32,
     pub focus_duration_secs: u32,
     pub language: Language,
+
+    // Rich context (FEAT — smarter coach)
+    /// 0..23, local time at the moment the coach is being summoned.
+    #[serde(default)]
+    pub hour_of_day: u8,
+    /// 0=Mon..6=Sun.
+    #[serde(default)]
+    pub weekday: u8,
+    /// Confirmed distractions today (after the gate).
+    #[serde(default)]
+    pub distractions_today: u32,
+    /// Total focus minutes the user has logged in the last 7 days.
+    #[serde(default)]
+    pub focus_minutes_7d: u32,
+    /// Last process name flagged as distraction, if any (e.g. "TikTok").
+    #[serde(default)]
+    pub last_distraction: Option<String>,
 }
 
 impl FocusContext {
@@ -41,6 +58,11 @@ impl FocusContext {
             xp_today: 0,
             focus_duration_secs,
             language,
+            hour_of_day: 12,
+            weekday: 0,
+            distractions_today: 0,
+            focus_minutes_7d: 0,
+            last_distraction: None,
         }
     }
 }

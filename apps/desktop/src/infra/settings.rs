@@ -110,10 +110,20 @@ pub struct Settings {
     // FEAT — user-configurable focus duration in minutes. Default 25 (classic Pomodoro).
     #[serde(default = "default_focus_minutes")]
     pub focus_minutes: u32,
+    #[serde(default = "default_break_minutes")]
+    pub break_minutes: u32,
+    #[serde(default = "default_long_break_minutes")]
+    pub long_break_minutes: u32,
 }
 
 fn default_focus_minutes() -> u32 {
     25
+}
+fn default_break_minutes() -> u32 {
+    5
+}
+fn default_long_break_minutes() -> u32 {
+    15
 }
 
 fn default_first_run() -> bool {
@@ -154,6 +164,8 @@ impl Default for Settings {
             ram_mode: RamMode::default(),
             first_run: true,
             focus_minutes: 25,
+            break_minutes: 5,
+            long_break_minutes: 15,
         }
     }
 }

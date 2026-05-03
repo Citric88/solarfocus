@@ -19,6 +19,7 @@ pub enum Route {
     Stats,
     Coach,
     Setup,
+    Help,
 }
 
 impl Default for Route {
@@ -150,6 +151,7 @@ pub fn view<'a, Msg: Clone + 'a>(
             make_btn(Route::Stats, IconGlyph::Stats, "Stats"),
             make_btn(Route::Coach, IconGlyph::Coach, "Coach"),
             make_btn(Route::Setup, IconGlyph::Setup, "Setup"),
+            make_btn(Route::Help, IconGlyph::Help, "Help"),
             flex_gap,
             pill,
             bot_pad,
@@ -174,6 +176,7 @@ pub enum IconGlyph {
     Stats,  // 3 ascending bars
     Coach,  // chat bubble
     Setup,  // gear (concentric circle + spokes)
+    Help,   // circle with "?" inside
 }
 
 struct IconCanvas {
@@ -262,6 +265,27 @@ impl<Msg> canvas::Program<Msg> for IconCanvas {
                 }
                 let center_dot = Path::circle(Point::new(cx, cy), 2.5);
                 frame.fill(&center_dot, color);
+            }
+            IconGlyph::Help => {
+                // Circle outline + drawn "?" hook + dot.
+                let outer = Path::circle(Point::new(cx, cy), 11.0);
+                frame.stroke(
+                    &outer,
+                    Stroke::default().with_color(color).with_width(2.0),
+                );
+                // Hook of the question mark: small arc top, leg down.
+                let hook = Path::new(|p| {
+                    p.move_to(Point::new(cx - 4.0, cy - 4.0));
+                    p.quadratic_curve_to(Point::new(cx, cy - 8.0), Point::new(cx + 4.0, cy - 4.0));
+                    p.quadratic_curve_to(Point::new(cx + 4.0, cy), Point::new(cx, cy + 1.0));
+                    p.line_to(Point::new(cx, cy + 4.0));
+                });
+                frame.stroke(
+                    &hook,
+                    Stroke::default().with_color(color).with_width(2.0),
+                );
+                let dot = Path::circle(Point::new(cx, cy + 7.0), 1.2);
+                frame.fill(&dot, color);
             }
         }
         vec![frame.into_geometry()]
