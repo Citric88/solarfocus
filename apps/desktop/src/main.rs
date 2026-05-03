@@ -1894,30 +1894,37 @@ impl App {
         ]
         .into();
 
-        // FIX-2 (rc14) — Feature cards with drawn icons (no emoji).
+        // FIX-B (rc15) — Feature cards now include a "Cómo funciona / How it
+        // works" body that explains the actual mechanism. No more one-liners.
         let feature = |num: &'static str,
                         glyph: ui::sidebar::IconGlyph,
                         title_str: String,
-                        desc_str: String|
+                        summary_str: String,
+                        howto_str: String|
          -> Element<'_, Message> {
             container(
-                iced::widget::row![
-                    iced::widget::Canvas::new(ui::sidebar::IconCanvas { glyph, selected: true })
-                        .width(Length::Fixed(28.0))
-                        .height(Length::Fixed(28.0)),
-                    iced::widget::Space::with_width(SPACE_MD as f32),
-                    column![
-                        iced::widget::row![
-                            text(num.to_string())
-                                .size(FONT_TINY)
-                                .color(TEXT_MUTED),
-                            iced::widget::Space::with_width(SPACE_XS as f32),
-                            text(title_str).size(FONT_BODY).color(TEXT_PRIMARY),
-                        ],
-                        text(desc_str).size(FONT_SMALL).color(TEXT_SECONDARY),
-                    ]
-                    .spacing(2),
+                column![
+                    iced::widget::row![
+                        iced::widget::Canvas::new(ui::sidebar::IconCanvas { glyph, selected: true })
+                            .width(Length::Fixed(28.0))
+                            .height(Length::Fixed(28.0)),
+                        iced::widget::Space::with_width(SPACE_MD as f32),
+                        column![
+                            iced::widget::row![
+                                text(num.to_string())
+                                    .size(FONT_TINY)
+                                    .color(TEXT_MUTED),
+                                iced::widget::Space::with_width(SPACE_XS as f32),
+                                text(title_str).size(FONT_BODY).color(TEXT_PRIMARY),
+                            ],
+                            text(summary_str).size(FONT_SMALL).color(TEXT_SECONDARY),
+                        ]
+                        .spacing(2),
+                    ],
+                    iced::widget::Space::with_height(SPACE_SM as f32),
+                    text(howto_str).size(FONT_TINY).color(TEXT_MUTED),
                 ]
+                .spacing(SPACE_XS as u16)
                 .padding(SPACE_SM as u16),
             )
             .padding(SPACE_SM as u16)
@@ -1939,24 +1946,65 @@ impl App {
         let features = column![
             feature("1", ui::sidebar::IconGlyph::Focus,
                 pick("Cronómetro Pomodoro", "Pomodoro timer"),
-                pick("Sesiones de foco + pausas configurables (Setup → General).",
-                     "Configurable focus + break durations (Setup → General).")),
+                pick("Sesiones de foco + pausas configurables.",
+                     "Configurable focus + break durations."),
+                pick("Cómo funciona: tras 25 minutos (configurable en Setup → General · Duraciones), \
+                      arranca una pausa corta de 5 min. Cada 4 sesiones la pausa se vuelve larga (15 min). \
+                      Puedes terminar la sesión cuando quieras con Esc o el botón \"Terminar sesión\".",
+                     "How it works: after 25 minutes (configurable in Setup → General · Durations), a 5-min short \
+                      break begins. Every 4 sessions the break becomes long (15 min). You can end the session \
+                      anytime with Esc or the \"End session\" button.")),
+
             feature("2", ui::sidebar::IconGlyph::Setup,
                 pick("Detección de distracciones", "Distraction detection"),
-                pick("Vigila la ventana activa y avisa cuando te alejas del trabajo.",
-                     "Watches the active window and alerts when you drift off-task.")),
+                pick("Avisa cuando te alejas del trabajo durante una sesión.",
+                     "Alerts you when you drift off-task during a session."),
+                pick("Cómo funciona: cada 10 segundos lee la ventana activa del sistema operativo \
+                      (nombre del proceso + título de la ventana, vía macOS NSWorkspace). \
+                      Compara contra una lista local de procesos/URLs (TikTok, Instagram, youtube.com/watch, etc.). \
+                      Necesita 2 muestras consecutivas con confianza ≥ 0.7 antes de mostrar un aviso (evita falsos positivos por cambio rápido de pestaña). \
+                      Privacidad: ni el nombre ni el título salen del equipo.",
+                     "How it works: every 10 seconds reads the active OS window (process name + title, via macOS NSWorkspace). \
+                      Compares against a local list of processes/URLs (TikTok, Instagram, youtube.com/watch, etc.). \
+                      Requires 2 consecutive samples at confidence ≥ 0.7 before alerting (prevents false positives from quick tab switches). \
+                      Privacy: neither name nor title leave your machine.")),
+
             feature("3", ui::sidebar::IconGlyph::Coach,
                 pick("Coach IA local", "Local AI coach"),
                 pick("Mensajes personalizados al iniciar, terminar o pausar sesiones.",
-                     "Personalized messages at session start, end, and pauses.")),
+                     "Personalized messages at session start, end, and pauses."),
+                pick("Cómo funciona: usa SmolLM2 1.7B (modelo de 1 GB que vive en tu disco) más un banco de \
+                      ~50 mensajes curados a mano. El coach combina hora del día, día de la semana, número \
+                      de sesiones hoy, racha actual y distracciones recientes para personalizar el mensaje. \
+                      Si el LLM produce algo incoherente, cae en el banco curado. Califica con Útil / No útil \
+                      en la pestaña Coach para mejorar futuros mensajes.",
+                     "How it works: uses SmolLM2 1.7B (a 1 GB model that lives on your disk) plus ~50 hand-curated \
+                      messages. The coach combines time of day, weekday, today's session count, current streak, \
+                      and recent distractions to personalize. If the LLM produces something incoherent it falls \
+                      back to the curated bank. Rate with Helpful / Not helpful in the Coach tab to improve.")),
+
             feature("4", ui::sidebar::IconGlyph::Stats,
                 pick("Resumen diario", "Daily recap"),
-                pick("Cada día genera un resumen con tus números reales (Stats).",
-                     "Generates a daily summary from your actual numbers (Stats).")),
+                pick("Resumen automático con tus números reales del día anterior.",
+                     "Automatic summary of yesterday's real numbers."),
+                pick("Cómo funciona: una vez al día (al cambiar de fecha local), pulla todas las sesiones \
+                      completadas del día anterior, calcula totales, y genera una frase de cierre con el LLM \
+                      grounded en los datos reales. El resumen se guarda en la base de datos SQLite local.",
+                     "How it works: once per day (on local date change), pulls all completed sessions from yesterday, \
+                      computes totals, and generates a closing sentence with the LLM grounded in the real data. \
+                      The summary is saved in the local SQLite database.")),
+
             feature("5", ui::sidebar::IconGlyph::Stats,
                 pick("Estadísticas", "Stats"),
                 pick("Sesiones, distracciones, gráfica semanal, totales históricos.",
-                     "Sessions, distractions, weekly chart, lifetime totals.")),
+                     "Sessions, distractions, weekly chart, lifetime totals."),
+                pick("Cómo funciona: cada sesión completada se guarda en SQLite local con timestamp y duración. \
+                      La pestaña Stats agrega contadores de hoy, esta semana y total histórico, más una gráfica \
+                      de minutos por día para los últimos 7 días. La base de datos vive en \
+                      ~/Library/Application Support/SolarFocus.",
+                     "How it works: each completed session is saved to local SQLite with timestamp and duration. \
+                      The Stats tab aggregates today, week, and lifetime counters plus a 7-day minutes-per-day chart. \
+                      The database lives in ~/Library/Application Support/SolarFocus.")),
         ]
         .spacing(SPACE_SM as u16);
 
@@ -2025,25 +2073,21 @@ impl App {
             shortcuts,
         ]
         .spacing(SPACE_LG as u16)
-        .max_width(640);
+        .padding(SPACE_XL as u16)
+        .max_width(720);
 
-        // FIX-HELP — wrap in a centered container so it doesn't bleed
-        // edge-to-edge. The outer container handles BG; an inner padded
-        // container constrains the body and centers it horizontally.
-        container(
-            container(body)
-                .padding(SPACE_XL as u16)
-                .max_width(680),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .padding([SPACE_LG as u16, SPACE_XL as u16])
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG)),
-            ..Default::default()
-        })
-        .into()
+        // FIX-B (rc15): scrollable wrapper so the now-richer feature cards
+        // are reachable on smaller windows. Body has Length::Shrink height
+        // (column default) so scrollable accepts it.
+        container(iced::widget::scrollable(body))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([SPACE_LG as u16, SPACE_XL as u16])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
+                ..Default::default()
+            })
+            .into()
     }
 
     /// FIX-4 (rc14) — Coach canvas with explicit purpose statement, text-label
@@ -3028,7 +3072,84 @@ impl App {
             .into()
         };
 
-        column![banner, perm, danger_zone]
+        // FIX-C (rc15) — Transparency: explain in plain language exactly
+        // what data is read for distraction detection.
+        let transparency = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "¿Cómo se detectan las distracciones?",
+                    Language::En => "How are distractions detected?",
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Cada 10 segundos, SolarFocus le pregunta al sistema operativo \
+                         qué ventana está activa. macOS responde con dos cosas:",
+                    Language::En =>
+                        "Every 10 seconds, SolarFocus asks the operating system \
+                         which window is active. macOS responds with two things:",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "  ·  Nombre del proceso (ej. \"Code\", \"Safari\", \"TikTok\")",
+                    Language::En =>
+                        "  ·  Process name (e.g. \"Code\", \"Safari\", \"TikTok\")",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "  ·  Título de la ventana (ej. \"Cool video — youtube.com/watch?v=abc\") \
+                         — solo si concedes Grabación de Pantalla",
+                    Language::En =>
+                        "  ·  Window title (e.g. \"Cool video — youtube.com/watch?v=abc\") \
+                         — only if you grant Screen Recording",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Esos textos se comparan contra una lista local de procesos y \
+                         palabras clave (TikTok, Instagram, youtube.com/watch, etc.). \
+                         Si coinciden 2 veces seguidas con confianza ≥ 70%, aparece un aviso.",
+                    Language::En =>
+                        "Those texts are compared against a local list of processes and \
+                         keywords (TikTok, Instagram, youtube.com/watch, etc.). \
+                         If they match 2 times in a row with ≥ 70% confidence, an alert appears.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Lo que NO hacemos: capturar pantalla, leer contenido de páginas, \
+                         enviar nada por la red, ni guardar el título en la base de datos. \
+                         La detección es 100% local y se descarta inmediatamente después.",
+                    Language::En =>
+                        "What we DO NOT do: take screenshots, read page contents, \
+                         send anything over the network, or save the title to the database. \
+                         Detection is 100% local and discarded immediately after.",
+                })
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        column![banner, perm, transparency, danger_zone]
             .spacing(SPACE_MD as u16)
             .into()
     }
@@ -3353,48 +3474,50 @@ impl App {
 
             // 2) Model already on disk (BUG-B: use cached probe).
             if self.model_present_cache.unwrap_or_else(|| model_present(manifest)) {
+                // FIX-A (rc15): split filename + buttons into two rows so
+                // long filenames never push "Eliminar" into 2-line wrapping.
                 return container(
-                    iced::widget::row![
-                        column![
-                            text(format!(
-                                "{} {}",
-                                match self.settings.language {
-                                    Language::Es => "✓ Modelo presente:",
-                                    Language::En => "✓ Model present:",
-                                },
-                                manifest.filename
-                            ))
-                            .size(FONT_BODY)
-                            .color(ACCENT),
-                            text(format!(
-                                "{:.1} MB",
-                                manifest.size_bytes as f64 / 1_048_576.0
-                            ))
-                            .size(FONT_SMALL)
-                            .color(TEXT_MUTED),
-                        ]
-                        .spacing(2),
-                        iced::widget::horizontal_space(),
-                        iced::widget::button(text(match self.settings.language {
-                            Language::Es => "Re-descargar",
-                            Language::En => "Re-download",
-                        }))
-                        .on_press(Message::StartModelDownload)
-                        .padding([6, 14]),
-                        iced::widget::Space::with_width(SPACE_XS as f32),
-                        iced::widget::button(text(match self.settings.language {
-                            Language::Es => "Eliminar",
-                            Language::En => "Delete",
-                        }))
-                        .on_press(Message::DeleteModel)
-                        .padding([6, 14])
-                        .style(|_, _| iced::widget::button::Style {
-                            background: Some(iced::Background::Color(DANGER)),
-                            text_color: BG,
-                            border: iced::Border { radius: 6.0.into(), ..Default::default() },
-                            ..Default::default()
-                        }),
+                    column![
+                        text(format!(
+                            "{} {}",
+                            match self.settings.language {
+                                Language::Es => "✓ Modelo presente:",
+                                Language::En => "✓ Model present:",
+                            },
+                            manifest.filename
+                        ))
+                        .size(FONT_BODY)
+                        .color(ACCENT),
+                        text(format!(
+                            "{:.1} MB",
+                            manifest.size_bytes as f64 / 1_048_576.0
+                        ))
+                        .size(FONT_SMALL)
+                        .color(TEXT_MUTED),
+                        iced::widget::Space::with_height(SPACE_SM as f32),
+                        iced::widget::row![
+                            iced::widget::button(text(match self.settings.language {
+                                Language::Es => "Re-descargar",
+                                Language::En => "Re-download",
+                            }))
+                            .on_press(Message::StartModelDownload)
+                            .padding([6, 18]),
+                            iced::widget::Space::with_width(SPACE_SM as f32),
+                            iced::widget::button(text(match self.settings.language {
+                                Language::Es => "Eliminar",
+                                Language::En => "Delete",
+                            }))
+                            .on_press(Message::DeleteModel)
+                            .padding([6, 18])
+                            .style(|_, _| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(DANGER)),
+                                text_color: BG,
+                                border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                                ..Default::default()
+                            }),
+                        ],
                     ]
+                    .spacing(2)
                     .padding(SPACE_SM as u16),
                 )
                 .padding(SPACE_MD as u16)
@@ -3735,13 +3858,10 @@ impl App {
         .spacing(SPACE_MD as u16)
         .max_width(640);
 
-        container(content)
-            .padding(SPACE_MD as u16)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG)),
-                ..Default::default()
-            })
-            .into()
+        // FIX-A (rc15): no outer background or padding — parent
+        // view_setup_tabs already provides BG + canvas padding.
+        // This prevents double-padding that pushed content into the sidebar.
+        content.into()
     }
 }
 
