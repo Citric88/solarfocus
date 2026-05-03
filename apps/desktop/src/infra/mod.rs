@@ -37,6 +37,10 @@ pub mod distilbert_download;
 #[cfg(feature = "presence")]
 pub mod presence;
 
+// 📅 v1.3 Wave C: read-only macOS calendar awareness (feature-gated).
+#[cfg(feature = "calendar")]
+pub mod calendar;
+
 use chrono::Utc;
 
 /// Inicializa el logger global con stdout + archivo

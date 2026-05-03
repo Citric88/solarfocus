@@ -83,6 +83,13 @@ pub enum Message {
     PresenceProbe,
     #[cfg(feature = "presence")]
     PresenceReady(Result<infra::presence::PresenceSample, String>),
+    // v1.3 Wave C — manual next-deadline input (label + HH:MM today).
+    #[cfg(feature = "calendar")]
+    SetDeadlineLabel(String),
+    #[cfg(feature = "calendar")]
+    SetDeadlineTime(String),
+    #[cfg(feature = "calendar")]
+    ClearDeadline,
     ThumbsUp,
     ThumbsDown,
 
@@ -210,6 +217,9 @@ pub struct App {
     // Mirrors settings.last_category and is only re-applied to settings
     // when non-empty after trim.
     custom_category_str: String,
+    // v1.3 Wave C — ephemeral input buffer for HH:MM today.
+    #[cfg(feature = "calendar")]
+    deadline_time_str: String,
 
     // v1.3 Wave B — camera presence probe (lazy init on first toggle).
     // Wrapped in Arc<Mutex<>> because PresenceProbe is Send+Sync but
@@ -389,6 +399,15 @@ impl App {
         let custom_break_str = settings.break_minutes.to_string();
         let custom_long_break_str = settings.long_break_minutes.to_string();
         let custom_category_str = settings.last_category.clone();
+        // v1.3 Wave C — initial deadline string (only used when `calendar`
+        // feature is on; computed unconditionally to keep code simple).
+        #[cfg(feature = "calendar")]
+        let initial_deadline_str: String = settings
+            .next_deadline_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+            .unwrap_or_default();
 
         (
             Self {
@@ -426,6 +445,8 @@ impl App {
                 custom_break_str,
                 custom_long_break_str,
                 custom_category_str,
+                #[cfg(feature = "calendar")]
+                deadline_time_str: initial_deadline_str,
                 #[cfg(feature = "presence")]
                 presence_probe: None,
                 #[cfg(feature = "presence")]
@@ -1262,6 +1283,45 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            // v1.3 Wave C — manual next-deadline input handlers.
+            #[cfg(feature = "calendar")]
+            Message::SetDeadlineLabel(s) => {
+                let trimmed: String = s.chars().take(60).collect();
+                self.settings.next_deadline_label = trimmed;
+                self.settings.save();
+                Task::none()
+            }
+            #[cfg(feature = "calendar")]
+            Message::SetDeadlineTime(s) => {
+                use chrono::{NaiveTime, TimeZone, Local};
+                // Accept "HH:MM" only. Anything else just buffers without
+                // applying.
+                let cleaned: String = s
+                    .chars()
+                    .filter(|c| c.is_ascii_digit() || *c == ':')
+                    .take(5)
+                    .collect();
+                self.deadline_time_str = cleaned.clone();
+                if let Ok(t) = NaiveTime::parse_from_str(&cleaned, "%H:%M") {
+                    let today = Local::now().date_naive();
+                    if let Some(dt) = Local
+                        .from_local_datetime(&today.and_time(t))
+                        .single()
+                    {
+                        self.settings.next_deadline_at = Some(dt.to_rfc3339());
+                        self.settings.save();
+                    }
+                }
+                Task::none()
+            }
+            #[cfg(feature = "calendar")]
+            Message::ClearDeadline => {
+                self.settings.next_deadline_at = None;
+                self.settings.next_deadline_label.clear();
+                self.deadline_time_str.clear();
+                self.settings.save();
+                Task::none()
             }
             #[cfg(feature = "presence")]
             Message::PresenceReady(result) => {
@@ -2645,9 +2705,14 @@ impl App {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
         };
 
+        // v1.3 Wave C — "next deadline in Xh Ym" badge when set.
+        let deadline_badge: Element<'_, Message> = self.deadline_badge();
+
         let content = column![
             hero,
-            iced::widget::Space::with_height(Length::Fixed(SPACE_MD as f32)),
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
+            deadline_badge,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
             category_picker,
             iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
             cta,
@@ -2733,6 +2798,70 @@ impl App {
             ..Default::default()
         })
         .into()
+    }
+
+    /// v1.3 Wave C — small badge under the timer showing how long
+    /// until the user's next configured deadline. Hidden if no deadline
+    /// is set or the deadline is in the past.
+    fn deadline_badge(&self) -> Element<'_, Message> {
+        #[cfg(feature = "calendar")]
+        use ui::palette::*;
+        #[cfg(feature = "calendar")]
+        {
+            if let Some(s) = self.settings.next_deadline_at.as_deref() {
+                if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) {
+                    let when = parsed.with_timezone(&chrono::Local);
+                    let now = chrono::Local::now();
+                    let delta = when - now;
+                    if delta.num_seconds() > 0 {
+                        let mins = delta.num_minutes();
+                        let h = mins / 60;
+                        let m = mins % 60;
+                        let label = if !self.settings.next_deadline_label.is_empty() {
+                            format!(
+                                "{} \"{}\" {} {}h{:02}m",
+                                match self.settings.language {
+                                    Language::Es => "Próximo:",
+                                    Language::En => "Next:",
+                                },
+                                self.settings.next_deadline_label,
+                                match self.settings.language {
+                                    Language::Es => "en",
+                                    Language::En => "in",
+                                },
+                                h,
+                                m,
+                            )
+                        } else {
+                            format!(
+                                "{} {}h{:02}m",
+                                match self.settings.language {
+                                    Language::Es => "Próxima reunión en",
+                                    Language::En => "Next meeting in",
+                                },
+                                h,
+                                m,
+                            )
+                        };
+                        return container(
+                            text(label).size(FONT_SMALL).color(TEXT_SECONDARY),
+                        )
+                        .padding([4, 12])
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(SURFACE_RAISED)),
+                            border: iced::Border {
+                                radius: 6.0.into(),
+                                width: 1.0,
+                                color: ACCENT_DIM,
+                            },
+                            ..Default::default()
+                        })
+                        .into();
+                    }
+                }
+            }
+        }
+        iced::widget::Space::with_height(Length::Fixed(0.0)).into()
     }
 
     fn state_label(&self) -> String {
@@ -3112,9 +3241,76 @@ impl App {
             ..Default::default()
         });
 
-        column![lang_card, duration_card, ram_card, shortcuts]
-            .spacing(SPACE_MD as u16)
-            .into()
+        // v1.3 Wave C — manual deadline card. Lets the user type a
+        // label + HH:MM today; the timer canvas surfaces a badge with
+        // "X in Yh Zm" until the deadline passes. v1.3.1 will replace
+        // this with live EventKit data.
+        #[cfg(feature = "calendar")]
+        let deadline_card: Element<'_, Message> = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Próxima reunión / deadline",
+                    Language::En => "Next meeting / deadline",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                iced::widget::row![
+                    iced::widget::text_input(
+                        match self.settings.language {
+                            Language::Es => "Etiqueta (ej. Standup)",
+                            Language::En => "Label (e.g. Standup)",
+                        },
+                        &self.settings.next_deadline_label,
+                    )
+                    .on_input(Message::SetDeadlineLabel)
+                    .padding([4, 8])
+                    .size(FONT_SMALL)
+                    .width(Length::Fixed(220.0)),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    iced::widget::text_input("HH:MM", &self.deadline_time_str)
+                        .on_input(Message::SetDeadlineTime)
+                        .padding([4, 8])
+                        .size(FONT_SMALL)
+                        .width(Length::Fixed(80.0)),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    chip_local(
+                        match self.settings.language {
+                            Language::Es => "Borrar".to_string(),
+                            Language::En => "Clear".to_string(),
+                        },
+                        false,
+                        Message::ClearDeadline,
+                    ),
+                ],
+                text(match self.settings.language {
+                    Language::Es => "v1.3.0: entrada manual. v1.3.1 leerá tu Calendar (iCloud, Google, Exchange) automáticamente.",
+                    Language::En => "v1.3.0: manual entry. v1.3.1 will read your Calendar (iCloud, Google, Exchange) automatically.",
+                })
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: ACCENT_DIM,
+            },
+            ..Default::default()
+        })
+        .into();
+
+        let mut col = iced::widget::Column::new().spacing(SPACE_MD as u16);
+        col = col.push(lang_card).push(duration_card).push(ram_card);
+        #[cfg(feature = "calendar")]
+        {
+            col = col.push(deadline_card);
+        }
+        col = col.push(shortcuts);
+        col.into()
     }
 
     fn lang_button(&self, lang: Language, label: &'static str) -> Element<'_, Message> {

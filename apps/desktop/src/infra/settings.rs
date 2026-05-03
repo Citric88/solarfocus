@@ -129,6 +129,15 @@ pub struct Settings {
     /// the focus session. 3 = ≈3 seconds.
     #[serde(default = "default_absent_threshold")]
     pub presence_absent_threshold: u8,
+
+    // v1.3 Wave C — manual "next deadline" stored as RFC3339 local
+    // datetime + a label. v1.3.1 will replace this with a live
+    // EventKit feed; the field stays as a fallback when permission
+    // is denied or no calendar accounts are configured.
+    #[serde(default)]
+    pub next_deadline_at: Option<String>,
+    #[serde(default)]
+    pub next_deadline_label: String,
 }
 
 fn default_absent_threshold() -> u8 {
@@ -192,6 +201,8 @@ impl Default for Settings {
             last_category: default_category(),
             presence_enabled: false,
             presence_absent_threshold: default_absent_threshold(),
+            next_deadline_at: None,
+            next_deadline_label: String::new(),
         }
     }
 }
