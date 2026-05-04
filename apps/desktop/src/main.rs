@@ -8,14 +8,12 @@
 //! - NEW: Window watcher polled every N seconds during focus sessions.
 //! - NEW: User settings persisted to JSON.
 
-use iced::{Element, Subscription, Task, window};
+use iced::{Element, Task, window};
 
 pub use solar_focus_core as SolarFocusCore;
 
 use solar_focus_intelligence::{
-    ClassificationLabel, ClassificationResult, Coach, CoachingTrigger, DistractionClassifier,
-    FocusContext, Language, MockClassifier, MockCoach, MockSummarizer, RulesClassifier,
-    Summarizer,
+    ClassificationLabel, ClassificationResult, CoachingTrigger, Language,
 };
 use solar_focus_core::focus_rules::FocusRulesEngine;
 use std::sync::Arc;
@@ -30,7 +28,13 @@ mod app;
 mod infra;
 mod ui;
 
+use app::builders::{
+    build_classifier, build_coach, build_summarizer, probe_permission_now, should_attempt_llm_load,
+};
 use app::helpers::{digits_only, parse_minutes, sanitize_for_display, wipe_all_local_data};
+pub use app::state::{
+    App, DownloadSnapshot, LoadedEngines, PermissionStatus, SetupTab, Toast, WizardStep,
+};
 use ui::sidebar::{Route, StatusPill};
 
 use chrono::Utc;
@@ -162,192 +166,6 @@ pub enum Message {
     DismissRecap,
 }
 
-pub struct App {
-    pomodoro_engine: SolarFocusCore::PomodoroEngine,
-    session_repo: Option<SessionRepository>,
-    last_state_was_completed: bool,
-
-    // v1.2 fields
-    settings: Settings,
-    coach: Arc<dyn Coach>,
-    summarizer: Arc<dyn Summarizer>,
-    classifier: Arc<dyn DistractionClassifier>,
-    last_coaching: Option<String>,
-    last_classification: Option<ClassificationResult>,
-    sessions_today: u8,
-    settings_open: bool,
-    session_started_at: Option<Instant>,
-    /// v1.4.1 — actual UTC wall-clock session start so the persisted
-    /// `sessions.start_time` reflects when focus *began*, not when the
-    /// row was written (the SessionCompleted handler used to set this
-    /// to Utc::now() at completion, breaking attention-score windows).
-    session_started_at_utc: Option<chrono::DateTime<chrono::Utc>>,
-
-    // Phase 2 fields
-    focus_rules: FocusRulesEngine,
-    consecutive_distraction_samples: u8,
-    toast: Option<Toast>,
-
-    // WIRE-2 — counters reset at midnight via DailyRollCheck
-    distractions_today: u32,
-
-    // WIRE-2 — cached macOS Screen Recording permission probe
-    permission_status: PermissionStatus,
-
-    // WIRE-3 — destructive confirm gate for "Borrar todos los datos"
-    confirming_clear: bool,
-
-    // Phase 3.5b — download lifecycle.
-    // download_progress is only *read* on llm builds; mark allow on default
-    // builds to avoid the dead_code warning.
-    download_active: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    download_progress: Arc<StdMutex<Option<DownloadSnapshot>>>,
-    download_error: Option<String>,
-    /// ENH-2 — flag flipped by `Message::CancelDownload`. The download
-    /// future polls this between chunks and bails when set.
-    download_cancel: Arc<AtomicBool>,
-
-    /// BUG-B — cached `model_present()` per ModelChoice + `feedback_counts()`.
-    /// Reading the filesystem and querying SQLite on every render makes
-    /// the AI tab visibly laggy. We refresh on Setup-tab open and after
-    /// download/delete completion only.
-    model_present_cache: Option<bool>,
-    feedback_counts_cache: (u32, u32),
-
-    // Phase 3.5b — daily summary scheduler
-    last_summary_date: Option<String>, // ISO YYYY-MM-DD of the last day we summarized
-    recap: Option<(String, String)>,   // (date, text) — shown as a card if Some
-
-    // UI-1 — current canvas route
-    route: Route,
-
-    // UI-4 — Setup tabs + wizard
-    setup_tab: SetupTab,
-    wizard_step: WizardStep,
-
-    // FIX-3 (rc14) — show advanced (debug) controls in AI tab.
-    // Ephemeral; not persisted.
-    setup_show_advanced: bool,
-
-    // v1.3 Wave A1 — ephemeral text-input buffers for free-form custom
-    // durations. Initialized from settings on App::new(). When the user
-    // types a valid u32 in 1..=180, both the buffer and the persisted
-    // setting are updated.
-    custom_focus_str: String,
-    custom_break_str: String,
-    custom_long_break_str: String,
-    // v1.3 Wave A2 — ephemeral text buffer for free-form category label.
-    // Mirrors settings.last_category and is only re-applied to settings
-    // when non-empty after trim.
-    custom_category_str: String,
-    // v1.3 Wave C — ephemeral input buffer for HH:MM today.
-    #[cfg(feature = "calendar")]
-    deadline_time_str: String,
-    // v1.3.1 — live EventKit reader (created lazily on first toggle).
-    #[cfg(feature = "calendar")]
-    calendar_reader: Option<std::sync::Arc<infra::calendar::ek::CalendarReader>>,
-    #[cfg(feature = "calendar")]
-    calendar_events: Vec<infra::calendar::CalendarEvent>,
-    #[cfg(feature = "calendar")]
-    calendar_error: Option<String>,
-
-    // v1.3 Wave B — camera presence probe (lazy init on first toggle).
-    // Wrapped in Arc<Mutex<>> because PresenceProbe is Send+Sync but
-    // mutable internally; spawn_blocking captures it.
-    #[cfg(feature = "presence")]
-    presence_probe: Option<std::sync::Arc<infra::presence::PresenceProbe>>,
-    #[cfg(feature = "presence")]
-    consecutive_absent_samples: u8,
-    #[cfg(feature = "presence")]
-    last_presence: Option<infra::presence::Presence>,
-    #[cfg(feature = "presence")]
-    presence_error: Option<String>,
-    /// v1.3.1 — last time we kicked off a YuNet inference, used to
-    /// throttle face detection to once every YUNET_THROTTLE_SECS while
-    /// the brightness path keeps polling at 1 Hz.
-    #[cfg(feature = "presence")]
-    last_yunet_at: Option<std::time::Instant>,
-    /// Most recent YuNet verdict + when the frame was captured. Used
-    /// alongside brightness so a stale "face seen" doesn't block an
-    /// auto-pause indefinitely.
-    #[cfg(feature = "presence")]
-    last_yunet: Option<(infra::presence::Presence, chrono::DateTime<chrono::Local>)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetupTab {
-    General,
-    Ai,
-    Privacy,
-    About,
-}
-impl Default for SetupTab {
-    fn default() -> Self {
-        SetupTab::General
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WizardStep {
-    Welcome,
-    Profile,
-    Download,
-    Done,
-}
-
-#[derive(Debug, Clone)]
-pub struct DownloadSnapshot {
-    pub downloaded: u64,
-    pub total: u64,
-    pub bytes_per_sec: u64,
-    pub verifying: bool,
-}
-
-#[derive(Debug, Clone)]
-struct Toast {
-    text: String,
-    expires_at: Instant,
-}
-
-/// PERF-1 — payload for `LlmEngineLoaded` carrying the freshly-loaded
-/// LlmRuntime. Wrapped in Arc so the Message can be Clone (iced requires).
-/// On non-llm builds this is a unit-like marker.
-#[cfg(feature = "llm")]
-#[derive(Clone)]
-pub struct LoadedEngines(pub std::sync::Arc<infra::llm::LlmRuntime>);
-
-#[cfg(not(feature = "llm"))]
-#[derive(Clone, Debug)]
-pub struct LoadedEngines;
-
-#[cfg(feature = "llm")]
-impl std::fmt::Debug for LoadedEngines {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LoadedEngines(<runtime>)")
-    }
-}
-
-/// Result of probing the foreground-window API. Drives the Privacy / Stats
-/// "permission status" badges. Cached on App; refreshed lazily.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionStatus {
-    /// Haven't probed yet this session.
-    Unknown,
-    /// Got both process_name and a non-empty title — permission granted.
-    Granted,
-    /// Got process_name but no title — typical of macOS without Screen
-    /// Recording permission.
-    NameOnly,
-    /// `active_win_pos_rs` returned Err — no window readable at all.
-    Denied,
-}
-
-impl Default for PermissionStatus {
-    fn default() -> Self {
-        PermissionStatus::Unknown
-    }
-}
 
 impl App {
     pub fn new() -> (Self, Task<Message>) {
@@ -724,139 +542,6 @@ fn yesterday_iso_local() -> Option<String> {
 }
 
 impl App {
-
-    pub fn title(&self) -> String {
-        match self.pomodoro_engine.state() {
-            SolarFocusCore::AppState::Idle => "SolarFocus OS - Esperando...".to_string(),
-            SolarFocusCore::AppState::Focusing(_) => "SolarFocus OS - En Foco".to_string(),
-            SolarFocusCore::AppState::Break => "SolarFocus OS - Descanso".to_string(),
-            SolarFocusCore::AppState::Completed => "SolarFocus OS - Completado".to_string(),
-        }
-    }
-
-    fn focus_context(&self) -> FocusContext {
-        use chrono::{Datelike, Local, Timelike};
-        let now = Local::now();
-        let weekday = now.weekday().num_days_from_monday() as u8;
-        let focus_minutes_7d = self
-            .session_repo
-            .as_ref()
-            .and_then(|r| r.weekly_focus_seconds().ok())
-            .map(|days| days.iter().map(|(_, s)| *s).sum::<u32>() / 60)
-            .unwrap_or(0);
-        let last_distraction = self
-            .last_classification
-            .as_ref()
-            .and_then(|c| c.matched_rule.clone())
-            .and_then(|rule| rule.split(':').nth(1).map(|s| s.to_string()));
-
-        FocusContext {
-            sessions_today: self.sessions_today,
-            streak: self.pomodoro_engine.sessions_completed(),
-            xp_today: 0, // wired in Phase 4 alongside RewardsSystem
-            focus_duration_secs: self.pomodoro_engine.config().focus_duration as u32,
-            language: self.settings.language,
-            hour_of_day: now.hour() as u8,
-            weekday,
-            distractions_today: self.distractions_today,
-            focus_minutes_7d,
-            last_distraction,
-            // v1.3 Wave A3 — pass the user's chosen category through
-            // so the curated bank can pick a category-flavored line.
-            category: Some(self.settings.last_category.clone()),
-        }
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        let mut subs: Vec<Subscription<Message>> = Vec::new();
-
-        if !self.pomodoro_engine.is_paused()
-            && matches!(
-                self.pomodoro_engine.state(),
-                SolarFocusCore::AppState::Focusing(_) | SolarFocusCore::AppState::Break
-            )
-        {
-            subs.push(
-                iced::time::every(Duration::from_millis(100))
-                    .map(|_| Message::TimerTick(0.1)),
-            );
-        }
-
-        if self.settings.window_watch_enabled
-            && matches!(
-                self.pomodoro_engine.state(),
-                SolarFocusCore::AppState::Focusing(_)
-            )
-        {
-            let secs = self.settings.window_poll_secs.max(1) as u64;
-            subs.push(
-                iced::time::every(Duration::from_secs(secs)).map(|_| Message::WindowProbe),
-            );
-        }
-
-        // v1.3 Wave B — presence probe ticks once per second while a focus
-        // session is active and the user has opted in.
-        #[cfg(feature = "presence")]
-        if self.settings.presence_enabled
-            && matches!(
-                self.pomodoro_engine.state(),
-                SolarFocusCore::AppState::Focusing(_)
-            )
-        {
-            subs.push(
-                iced::time::every(Duration::from_secs(1)).map(|_| Message::PresenceProbe),
-            );
-        }
-
-        // v1.3.1 — calendar refresh once per minute while live mode is on.
-        #[cfg(feature = "calendar")]
-        if self.settings.calendar_live_enabled && self.calendar_reader.is_some() {
-            subs.push(
-                iced::time::every(Duration::from_secs(60)).map(|_| Message::CalendarRefresh),
-            );
-        }
-
-        // Toast lifecycle ticks at 1 Hz while a toast is showing.
-        if self.toast.is_some() {
-            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::ToastTick));
-        }
-
-        // Download progress poller: 4 Hz while a download is active.
-        if self.download_active.load(Ordering::Relaxed) {
-            subs.push(
-                iced::time::every(Duration::from_millis(250)).map(|_| Message::DownloadPoll),
-            );
-        }
-
-        // Daily roll-over check: once per minute, always on.
-        subs.push(iced::time::every(Duration::from_secs(60)).map(|_| Message::DailyRollCheck));
-
-        // UI-1 — keyboard shortcuts.
-        subs.push(iced::keyboard::on_key_press(|key, _modifiers| {
-            use iced::keyboard::key::{Key, Named};
-            match key.as_ref() {
-                Key::Named(Named::Space) => Some(Message::Pause),
-                Key::Named(Named::Escape) => Some(Message::EndSession),
-                Key::Character("r") | Key::Character("R") => Some(Message::Resume),
-                Key::Character("p") | Key::Character("P") => Some(Message::Pause),
-                Key::Character("b") | Key::Character("B") => Some(Message::TakeBreak),
-                Key::Character("s") | Key::Character("S") => {
-                    Some(Message::SwitchRoute(Route::Setup))
-                }
-                Key::Character("1") => Some(Message::SwitchRoute(Route::Focus)),
-                Key::Character("2") => Some(Message::SwitchRoute(Route::Stats)),
-                Key::Character("3") => Some(Message::SwitchRoute(Route::Coach)),
-                Key::Character("4") => Some(Message::SwitchRoute(Route::Setup)),
-                Key::Character("5") | Key::Character("?") => {
-                    Some(Message::SwitchRoute(Route::Help))
-                }
-                _ => None,
-            }
-        }));
-
-        Subscription::batch(subs)
-    }
-
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::StartFocus => {
@@ -2145,88 +1830,6 @@ impl App {
     //   view_wizard + wizard_welcome / wizard_profile / wizard_download → ui/views/wizard.rs
 }
 
-/// Synchronous one-off probe of the foreground-window API. Cheap (~ms);
-/// safe to call from update() since iced's update is on the main thread.
-fn probe_permission_now() -> PermissionStatus {
-    match infra::window_watch::WindowWatcher::poll(0) {
-        Some(s) => match s.window_title {
-            Some(t) if !t.trim().is_empty() => PermissionStatus::Granted,
-            _ => PermissionStatus::NameOnly,
-        },
-        None => PermissionStatus::Denied,
-    }
-}
-
-/// Select the active Coach based on settings + compile-time `llm` feature.
-///
-/// PERF-1: returns MockCoach immediately. If the LLM feature is on AND
-/// the model file is present, the App will dispatch a background
-/// spawn_engine_load() that hot-swaps a real LlmCoach in once the
-/// runtime is loaded. This keeps App::new fast (window paints in <1s
-/// instead of 3-5s).
-///
-/// `loaded_runtime` is the optional already-loaded runtime from a recent
-/// spawn_engine_load — passed in to avoid loading twice.
-fn build_coach(settings: &Settings) -> Arc<dyn Coach> {
-    if !settings.ai_enabled {
-        log::info!("AI disabled → using MockCoach");
-        return Arc::new(MockCoach);
-    }
-    Arc::new(MockCoach)
-}
-
-/// Same deferred semantics as `build_coach` — see PERF-1 docs above.
-fn build_summarizer(settings: &Settings) -> Arc<dyn Summarizer> {
-    if !settings.ai_enabled {
-        return Arc::new(MockSummarizer);
-    }
-    Arc::new(MockSummarizer)
-}
-
-/// PERF-1: returns true if we should bother hot-loading a real LLM at boot.
-fn should_attempt_llm_load(settings: &Settings) -> bool {
-    if !settings.ai_enabled {
-        return false;
-    }
-    #[cfg(feature = "llm")]
-    {
-        use infra::model_download::{manifest_for, model_present};
-        if let Some(m) = manifest_for(settings.model_choice) {
-            return model_present(m);
-        }
-    }
-    false
-}
-
-fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
-    match settings.classifier_mode {
-        ClassifierMode::Mock => Arc::new(MockClassifier),
-        ClassifierMode::Rules => {
-            let path = settings.effective_rules_path();
-            Arc::new(RulesClassifier::bundled_with_user_override(&path))
-        }
-        ClassifierMode::Distilbert => {
-            #[cfg(feature = "classifier")]
-            {
-                use infra::onnx_classifier::OnnxClassifier;
-                match OnnxClassifier::try_load() {
-                    Ok(c) => return Arc::new(c),
-                    Err(e) => {
-                        log::warn!("DistilBERT unavailable ({e}) — falling back to rules");
-                    }
-                }
-            }
-            #[cfg(not(feature = "classifier"))]
-            {
-                log::warn!(
-                    "ClassifierMode::Distilbert requested but binary built without `classifier` feature — falling back to rules"
-                );
-            }
-            let path = settings.effective_rules_path();
-            Arc::new(RulesClassifier::bundled_with_user_override(&path))
-        }
-    }
-}
 
 fn main() -> iced::Result {
     infra::init_logger(false);
