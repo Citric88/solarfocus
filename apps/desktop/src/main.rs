@@ -1052,19 +1052,46 @@ impl App {
                                 ))
                                 .spawn();
                         }
-                        let toast_text = match self.settings.language {
-                            Language::Es => match &c.matched_rule {
-                                Some(r) => format!("Distracción detectada ({}). ¿Pausa o vuelves?", r),
-                                None => "Distracción detectada. ¿Pausa o vuelves?".to_string(),
+                        // v1.4.1 — auto-pause the focus session on a
+                        // confirmed window distraction. Live test of
+                        // v1.4.0 surfaced the gap: a notification fired
+                        // and the row was logged, but the timer kept
+                        // counting as if the user was focused. That's
+                        // the same bug we fixed for camera absence in
+                        // v1.3.x; fix it here for window distractions
+                        // too. Auto-pause only when actually focusing.
+                        let auto_paused = matches!(
+                            self.pomodoro_engine.state(),
+                            SolarFocusCore::AppState::Focusing(_)
+                        ) && !self.pomodoro_engine.is_paused();
+                        if auto_paused {
+                            self.pomodoro_engine.pause(0.0);
+                            log::warn!(
+                                "Auto-paused: window distraction confirmed (rule={:?})",
+                                c.matched_rule
+                            );
+                        }
+                        let toast_text = match (self.settings.language, auto_paused) {
+                            (Language::Es, true) => match &c.matched_rule {
+                                Some(r) => format!("Sesión pausada por distracción ({}).", r),
+                                None => "Sesión pausada por distracción.".to_string(),
                             },
-                            Language::En => match &c.matched_rule {
-                                Some(r) => format!("Distraction detected ({}). Pause or refocus?", r),
-                                None => "Distraction detected. Pause or refocus?".to_string(),
+                            (Language::Es, false) => match &c.matched_rule {
+                                Some(r) => format!("Distracción detectada ({}).", r),
+                                None => "Distracción detectada.".to_string(),
+                            },
+                            (Language::En, true) => match &c.matched_rule {
+                                Some(r) => format!("Session paused — distraction ({}).", r),
+                                None => "Session paused — distraction.".to_string(),
+                            },
+                            (Language::En, false) => match &c.matched_rule {
+                                Some(r) => format!("Distraction detected ({}).", r),
+                                None => "Distraction detected.".to_string(),
                             },
                         };
                         tasks.push(Task::done(Message::ShowToast {
                             text: toast_text,
-                            expires_in_secs: 4,
+                            expires_in_secs: 5,
                         }));
                         self.consecutive_distraction_samples = 0;
                     }
