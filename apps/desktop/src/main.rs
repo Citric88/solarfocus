@@ -3196,17 +3196,27 @@ impl App {
             .map(|t| !t.text.trim().is_empty())
             .unwrap_or(false);
         let microcopy: Element<'_, Message> = if toast_visible {
+            // v1.4.0 rc9 — readable toast: bigger text, explicit
+            // near-black color (not BG which had a green tint that
+            // some screens rendered as low-contrast on the yellow
+            // WARNING background), bolded close × that's actually
+            // visible.
             let t = self.toast.as_ref().unwrap();
+            let toast_text_color = iced::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 };
             container(
                 iced::widget::row![
-                    text(t.text.clone()).size(FONT_BODY).color(BG),
+                    text(t.text.clone())
+                        .size(FONT_LEAD)
+                        .color(toast_text_color),
                     iced::widget::horizontal_space(),
-                    button(text("×").size(FONT_SMALL))
+                    button(text("×").size(FONT_LEAD).color(toast_text_color))
                         .on_press(Message::DismissToast)
-                        .padding([2, 8])
+                        .padding([2, 10])
                         .style(|_, _| button::Style {
-                            background: Some(iced::Background::Color(WARNING)),
-                            text_color: BG,
+                            background: Some(iced::Background::Color(iced::Color {
+                                r: 0.05, g: 0.05, b: 0.05, a: 0.10,
+                            })),
+                            text_color: iced::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 },
                             border: iced::Border {
                                 radius: 3.0.into(),
                                 ..Default::default()
@@ -3214,7 +3224,8 @@ impl App {
                             ..Default::default()
                         }),
                 ]
-                .padding(SPACE_SM as u16),
+                .padding(SPACE_SM as u16)
+                .align_y(iced::alignment::Vertical::Center),
             )
             .padding(SPACE_SM as u16)
             .style(|_| container::Style {
