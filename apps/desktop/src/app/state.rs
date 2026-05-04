@@ -18,7 +18,9 @@ use solar_focus_core::focus_rules::FocusRulesEngine;
 use crate::infra::persistence::SessionRepository;
 use crate::infra::settings::Settings;
 use crate::ui::sidebar::Route;
-use crate::{infra, SolarFocusCore};
+use crate::SolarFocusCore;
+#[cfg(any(feature = "calendar", feature = "presence", feature = "llm"))]
+use crate::infra;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupTab {
