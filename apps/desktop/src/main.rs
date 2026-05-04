@@ -2186,15 +2186,36 @@ impl App {
             let rows: Vec<Element<'_, Message>> = today_sessions
                 .into_iter()
                 .map(|s| {
-                    let when = s.start_time.format("%H:%M").to_string();
+                    let when = s.start_time.with_timezone(&chrono::Local).format("%H:%M").to_string();
                     let mins = (s.duration / 60.0).round() as u32;
                     container(
                         iced::widget::row![
                             text(when).size(FONT_SMALL).color(TEXT_SECONDARY),
                             iced::widget::Space::with_width(SPACE_MD as f32),
-                            text(format!("{} min · {}", mins, s.state))
+                            text(format!("{} min", mins))
                                 .size(FONT_SMALL)
                                 .color(TEXT_PRIMARY),
+                            iced::widget::Space::with_width(SPACE_SM as f32),
+                            // v1.4.0 — category chip-style label.
+                            container(
+                                text(s.category.clone())
+                                    .size(FONT_TINY)
+                                    .color(ACCENT),
+                            )
+                            .padding([2, 8])
+                            .style(|_| container::Style {
+                                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                                border: iced::Border {
+                                    radius: 4.0.into(),
+                                    width: 1.0,
+                                    color: ACCENT_DIM,
+                                },
+                                ..Default::default()
+                            }),
+                            iced::widget::horizontal_space(),
+                            text(s.state.clone())
+                                .size(FONT_TINY)
+                                .color(TEXT_MUTED),
                         ]
                         .padding(SPACE_XS as u16),
                     )
@@ -2336,6 +2357,102 @@ impl App {
         .size(FONT_BODY)
         .color(TEXT_SECONDARY);
 
+        // v1.4.0 rc1 — "Por categoría / By category" panel.
+        // Fed by the existing persistence::category_totals_last_days(7).
+        let category_totals = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.category_totals_last_days(7).ok())
+            .unwrap_or_default();
+        let category_card: Element<'_, Message> = {
+            let title = text(match self.settings.language {
+                Language::Es => "Por categoría · últimos 7 días",
+                Language::En => "By category · last 7 days",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED);
+            let inner: Element<'_, Message> = if category_totals.is_empty() {
+                text(match self.settings.language {
+                    Language::Es => "Aún no hay sesiones con categoría en los últimos 7 días.",
+                    Language::En => "No category-tagged sessions in the last 7 days.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED)
+                .into()
+            } else {
+                let total_secs: u32 = category_totals.iter().map(|(_, s, _)| *s).sum();
+                let max_secs: u32 = category_totals
+                    .iter()
+                    .map(|(_, s, _)| *s)
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                let rows: Vec<Element<'_, Message>> = category_totals
+                    .iter()
+                    .map(|(name, secs, count)| {
+                        let mins = secs / 60;
+                        let pct = if total_secs > 0 {
+                            (*secs as f32 / total_secs as f32 * 100.0).round() as u32
+                        } else { 0 };
+                        let bar_w = (*secs as f32 / max_secs as f32 * 280.0).max(2.0);
+                        let bar = iced::widget::container(
+                            iced::widget::Space::with_height(Length::Fixed(8.0)),
+                        )
+                        .width(Length::Fixed(bar_w))
+                        .height(Length::Fixed(8.0))
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(ACCENT)),
+                            border: iced::Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        });
+                        container(
+                            column![
+                                iced::widget::row![
+                                    text(name.clone())
+                                        .size(FONT_BODY)
+                                        .color(TEXT_PRIMARY),
+                                    iced::widget::horizontal_space(),
+                                    text(format!(
+                                        "{} min · {} {} · {}%",
+                                        mins,
+                                        count,
+                                        match self.settings.language {
+                                            Language::Es => if *count == 1 { "sesión" } else { "sesiones" },
+                                            Language::En => if *count == 1 { "session" } else { "sessions" },
+                                        },
+                                        pct,
+                                    ))
+                                    .size(FONT_TINY)
+                                    .color(TEXT_SECONDARY),
+                                ],
+                                bar,
+                            ]
+                            .spacing(SPACE_XS as u16),
+                        )
+                        .padding([SPACE_XS as u16, 0])
+                        .into()
+                    })
+                    .collect();
+                column(rows).spacing(SPACE_SM as u16).into()
+            };
+            container(column![title, inner].spacing(SPACE_SM as u16))
+                .padding(SPACE_MD as u16)
+                .width(Length::Fixed(560.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: ACCENT_DIM,
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
+
         let body = column![
             text(match self.settings.language {
                 Language::Es => "Estadísticas",
@@ -2346,6 +2463,7 @@ impl App {
             perm_card,
             cards,
             chart_card,
+            category_card,
             recap_card,
             sessions_title,
             sessions_list,
