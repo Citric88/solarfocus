@@ -2442,12 +2442,14 @@ impl App {
         .size(FONT_BODY)
         .color(TEXT_SECONDARY);
 
-        // v1.4.0 rc6 — honest disclaimer about what "Atención" actually
-        // measures. Surfaced after the user-test "I was on my phone the
-        // whole time but got Atención 100%" — we can't see other devices.
+        // v1.4.0 rc7 — disclaimer + open invitation to extend the
+        // deny list. After live-test feedback ("I was on Games and
+        // still got 100%"), the rules.toml deny list now covers the
+        // macOS Games app and major launchers, but custom titles
+        // still need a user override.
         let attention_disclaimer = text(match self.settings.language {
-            Language::Es => "Atención = ventanas distractoras (deny-list) + ausencias detectadas por la cámara. No puede ver tu teléfono u otros dispositivos. Si tu cara está frente a la pantalla mientras revisas el móvil, la sesión seguirá apareciendo como enfocada.",
-            Language::En => "Focus score = denylisted windows + camera-detected absences. It can't see your phone or other devices. If your face stays in view while you scroll your phone, the session still counts as focused.",
+            Language::Es => "Atención = ventanas en la deny-list + ausencias detectadas por la cámara. La lista cubre redes sociales, streaming y juegos populares. Si una app o web te distrae y no la cuenta, edita rules.toml en ~/Library/Application Support/SolarFocus OS. Otros dispositivos (teléfono, tablet) no se detectan.",
+            Language::En => "Focus score = denylisted windows + camera-detected absences. The list covers social, streaming, and major games. If an app or site distracts you and isn't counted, edit rules.toml under ~/Library/Application Support/SolarFocus OS. Other devices (phone, tablet) aren't detected.",
         })
         .size(FONT_TINY)
         .color(TEXT_MUTED);
