@@ -125,15 +125,31 @@ impl App {
                     let start_time = self
                         .session_started_at_utc
                         .unwrap_or_else(|| Utc::now() - chrono::Duration::seconds(duration as i64));
+
+                    // v1.8.0 — compute attention score and is_valid against
+                    // the user's threshold. Score = 100 - 20*distractions
+                    // (matches the Stats badge formula). is_valid=false flags
+                    // the session as not-counting-for-streaks; nothing
+                    // destructive — the row still persists.
+                    let confirmed = repo
+                        .distractions_in_session_window(&start_time, duration)
+                        .unwrap_or(0);
+                    let score = 100i32.saturating_sub(20 * confirmed as i32).max(0) as u8;
+                    let is_valid =
+                        score >= self.settings.min_attention_for_valid_session;
+
                     let record = infra::persistence::SessionRecord {
                         id: None,
                         start_time,
                         duration,
                         state: "completed".to_string(),
                         category: self.settings.last_category.clone(),
+                        is_valid,
                     };
                     match repo.save_session(&record) {
-                        Ok(id) => log::info!("Sesión #{} guardada", id),
+                        Ok(id) => log::info!(
+                            "Sesión #{id} guardada (atención={score}%, válida={is_valid})"
+                        ),
                         Err(e) => log::error!("Fallo guardando sesión: {}", e),
                     }
                 }
@@ -1271,6 +1287,13 @@ impl App {
                     text: toast_text,
                     expires_at: Instant::now() + Duration::from_secs(5),
                 });
+                Task::none()
+            }
+
+            Message::SetMinAttention(value) => {
+                let clamped = value.min(100);
+                self.settings.min_attention_for_valid_session = clamped;
+                self.settings.save();
                 Task::none()
             }
 

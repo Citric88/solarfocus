@@ -225,21 +225,31 @@ impl App {
                         Language::En => format!("Focus {}%", attention),
                     };
                     let _ = &s.state;
-                    container(
-                        iced::widget::row![
-                            text(when).size(FONT_SMALL).color(TEXT_SECONDARY),
-                            iced::widget::Space::with_width(SPACE_MD as f32),
+                    let mut row = iced::widget::Row::new()
+                        .push(text(when).size(FONT_SMALL).color(TEXT_SECONDARY))
+                        .push(iced::widget::Space::with_width(SPACE_MD as f32))
+                        .push(
                             text(format!("{} min", mins))
                                 .size(FONT_SMALL)
                                 .color(TEXT_PRIMARY),
-                            iced::widget::Space::with_width(SPACE_SM as f32),
-                            badge_local(s.category.clone(), BadgeVariant::Accent),
-                            iced::widget::Space::with_width(SPACE_SM as f32),
-                            badge_local(attention_label, attention_variant),
-                            iced::widget::horizontal_space(),
-                        ]
-                        .padding(SPACE_XS as u16)
-                        .align_y(iced::alignment::Vertical::Center),
+                        )
+                        .push(iced::widget::Space::with_width(SPACE_SM as f32))
+                        .push(badge_local(s.category.clone(), BadgeVariant::Accent))
+                        .push(iced::widget::Space::with_width(SPACE_SM as f32))
+                        .push(badge_local(attention_label, attention_variant));
+                    if !s.is_valid {
+                        let invalid_label = match self.settings.language {
+                            Language::Es => "No válida".to_string(),
+                            Language::En => "Invalid".to_string(),
+                        };
+                        row = row
+                            .push(iced::widget::Space::with_width(SPACE_SM as f32))
+                            .push(badge_local(invalid_label, BadgeVariant::Muted));
+                    }
+                    row = row.push(iced::widget::horizontal_space());
+                    container(
+                        row.padding(SPACE_XS as u16)
+                            .align_y(iced::alignment::Vertical::Center),
                     )
                     .padding(SPACE_XS as u16)
                     .into()

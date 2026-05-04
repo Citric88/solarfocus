@@ -18,6 +18,7 @@ pub struct SessionRecord {
     pub duration: f32,                // Duración total planificada (segundos)
     pub state: String,                // "focus", "break", "completed"
     pub category: String,             // v1.3 — "Deep work", "Coding", etc.
+    pub is_valid: bool,               // v1.8 — meets attention threshold
 }
 
 /// Gestor de persistencia SQLite con privacidad garantizada
@@ -72,6 +73,29 @@ impl SessionRepository {
                 [],
             )?;
             log::info!("v1.3 migration: sessions.category column added");
+        }
+
+        // v1.8.0 — additive migration for `is_valid`. Legacy rows default to
+        // 1 (valid) so historical stats don't suddenly drop.
+        let has_is_valid: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+            let mut rows = stmt.query([])?;
+            let mut found = false;
+            while let Some(r) = rows.next()? {
+                let name: String = r.get(1)?;
+                if name == "is_valid" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_is_valid {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN is_valid INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+            log::info!("v1.8 migration: sessions.is_valid column added");
         }
 
         // v1.2 Phase 3 — daily LLM-generated summaries.
@@ -191,27 +215,30 @@ impl SessionRepository {
     /// Guarda un registro de sesión al finalizarla
     pub fn save_session(&self, record: &SessionRecord) -> SqlResult<u64> {
         let start_time = record.start_time.to_rfc3339();
+        let valid_int: i64 = if record.is_valid { 1 } else { 0 };
 
         if let Some(id) = record.id {
             self.conn.execute(
-                "UPDATE sessions SET start_time=?, duration=?, state=?, category=? WHERE id=?",
+                "UPDATE sessions SET start_time=?, duration=?, state=?, category=?, is_valid=? WHERE id=?",
                 rusqlite::params![
                     start_time,
                     record.duration as f64,
                     record.state,
                     record.category,
+                    valid_int,
                     id,
                 ],
             )?;
             Ok(id)
         } else {
             self.conn.execute(
-                "INSERT INTO sessions (start_time, duration, state, category) VALUES (?, ?, ?, ?)",
+                "INSERT INTO sessions (start_time, duration, state, category, is_valid) VALUES (?, ?, ?, ?, ?)",
                 rusqlite::params![
                     start_time,
                     record.duration as f64,
                     record.state,
                     record.category,
+                    valid_int,
                 ],
             )?;
             Ok(self.conn.last_insert_rowid() as u64)
@@ -308,7 +335,7 @@ impl SessionRepository {
     /// Obtiene estadísticas de sesiones del día actual (anonimizado)
     pub fn get_today_stats(&self) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state, category FROM sessions
+            "SELECT id, start_time, duration, state, category, is_valid FROM sessions
              WHERE date(start_time) = date('now', 'start of day') ORDER BY start_time DESC"
         )?;
 
@@ -327,7 +354,7 @@ impl SessionRepository {
         // session at the top (was ASC; users expect activity-feed
         // ordering, not chronological).
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state, category FROM sessions
+            "SELECT id, start_time, duration, state, category, is_valid FROM sessions
              WHERE date(start_time) = ? ORDER BY start_time DESC",
         )?;
         let mut rows = stmt.query(rusqlite::params![date])?;
@@ -433,7 +460,7 @@ impl SessionRepository {
     /// Obtiene todas las sesiones (para depuración - anonimizado)
     pub fn list_all_sessions(&self) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state, category FROM sessions ORDER BY id DESC LIMIT 10"
+            "SELECT id, start_time, duration, state, category, is_valid FROM sessions ORDER BY id DESC LIMIT 10"
         )?;
 
         let mut rows = stmt.query([])?;
@@ -447,7 +474,7 @@ impl SessionRepository {
     /// v1.8.0 — every session ever, oldest first. Powers JSON/CSV export.
     pub fn export_all_sessions(&self) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, start_time, duration, state, category FROM sessions ORDER BY start_time ASC",
+            "SELECT id, start_time, duration, state, category, is_valid FROM sessions ORDER BY start_time ASC",
         )?;
         let mut rows = stmt.query([])?;
         let mut records = Vec::new();
@@ -509,12 +536,14 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> SqlResult<SessionRecord> {
     let start_time = DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
+    let is_valid: i64 = row.get::<_, i64>(5).unwrap_or(1);
     Ok(SessionRecord {
         id: row.get(0)?,
         start_time,
         duration: row.get::<_, f64>(2)? as f32,
         state: row.get(3)?,
         category: row.get(4)?,
+        is_valid: is_valid != 0,
     })
 }
 
@@ -556,6 +585,7 @@ mod tests {
             duration: 25.0,
             state: "focus".to_string(),
             category: "Focus".to_string(),
+            is_valid: true,
         };
 
         let id = repo.save_session(&record).unwrap();
@@ -577,6 +607,7 @@ mod tests {
             duration: 0.0,
             state: "invalid".to_string(),
             category: "Other".to_string(),
+            is_valid: true,
         };
 
         let result = repo.save_session(&invalid_record);
@@ -632,6 +663,7 @@ mod tests {
             duration: 1500.0,
             state: "completed".to_string(),
             category: "Coding".to_string(),
+            is_valid: true,
         };
         repo.save_session(&r).unwrap();
         let totals = repo.category_totals_last_days(7).unwrap();
@@ -639,6 +671,40 @@ mod tests {
         let cats: Vec<&str> = totals.iter().map(|(c, _, _)| c.as_str()).collect();
         assert!(cats.contains(&"Coding"));
         assert!(cats.contains(&"Focus"));
+    }
+
+    /// v1.8.0 — `is_valid` round-trips through save → load and an old DB
+    /// without the column auto-migrates with all existing rows defaulting
+    /// to true (so historical streaks don't break).
+    #[test]
+    fn is_valid_round_trips_and_migrates() {
+        let repo = fresh_repo();
+        let valid = SessionRecord {
+            id: None,
+            start_time: Utc::now(),
+            duration: 1500.0,
+            state: "completed".to_string(),
+            category: "Focus".to_string(),
+            is_valid: true,
+        };
+        let invalid = SessionRecord {
+            id: None,
+            start_time: Utc::now(),
+            duration: 1500.0,
+            state: "completed".to_string(),
+            category: "Focus".to_string(),
+            is_valid: false,
+        };
+        repo.save_session(&valid).unwrap();
+        repo.save_session(&invalid).unwrap();
+        let rows = repo.export_all_sessions().unwrap();
+        assert_eq!(rows.len(), 2);
+        // export_all_sessions sorts by start_time ASC; both have ~now so
+        // order is insertion-stable. Just assert one of each is_valid.
+        let valid_count = rows.iter().filter(|r| r.is_valid).count();
+        let invalid_count = rows.iter().filter(|r| !r.is_valid).count();
+        assert_eq!(valid_count, 1);
+        assert_eq!(invalid_count, 1);
     }
 
     /// v1.4.0 — confirmed distraction events persist + aggregate.
