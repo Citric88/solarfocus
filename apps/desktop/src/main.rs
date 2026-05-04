@@ -2855,7 +2855,11 @@ impl App {
                         .spacing(2),
                     ],
                     iced::widget::Space::with_height(SPACE_SM as f32),
-                    text(howto_str).size(FONT_TINY).color(TEXT_MUTED),
+                    // v1.5.0 — bump "Cómo funciona" body from FONT_TINY
+                    // to FONT_SMALL. The audit found it read as a
+                    // footnote rather than substantive copy; with this
+                    // size it's actually readable in the layout.
+                    text(howto_str).size(FONT_SMALL).color(TEXT_MUTED),
                 ]
                 .spacing(SPACE_XS as u16)
                 .padding(SPACE_SM as u16),
@@ -2863,9 +2867,13 @@ impl App {
             .padding(SPACE_SM as u16)
             .style(|_| container::Style {
                 background: Some(iced::Background::Color(SURFACE)),
+                // v1.5.0 — same 1 px ACCENT_DIM border the privacy
+                // hero card uses, so feature cards belong to the same
+                // visual language.
                 border: iced::Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: ACCENT_DIM,
                 },
                 ..Default::default()
             })
@@ -3800,28 +3808,13 @@ impl App {
             ..Default::default()
         });
 
-        // FEAT — chip helper that takes selected predicate + on-press builder.
-        let chip = |label: String,
-                    selected: bool,
-                    msg: Message|
-         -> Element<'_, Message> {
-            iced::widget::button(text(label).size(FONT_SMALL).color(BG))
-                .on_press(msg)
-                .padding([6, 14])
-                .style(move |_, _| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(if selected {
-                        ACCENT
-                    } else {
-                        SURFACE_RAISED
-                    })),
-                    text_color: if selected { BG } else { TEXT_PRIMARY },
-                    border: iced::Border {
-                        radius: 6.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-                .into()
+        // v1.5.0 — was an inline closure that diverged from the
+        // global `chip_local`: no border, no hover highlight, smaller
+        // selected/unselected contrast. Forwarding to chip_local
+        // gives the Duraciones rows the same look as Categoría
+        // chips and Setup → AI chips.
+        let chip = |label: String, selected: bool, msg: Message| -> Element<'_, Message> {
+            chip_local(label, selected, msg)
         };
         let row_chips = |label: String,
                          opts: &[u32],
@@ -4524,9 +4517,13 @@ impl App {
 
     fn view_setup_about(&self) -> Element<'_, Message> {
         use ui::palette::*;
-        column![
+        // v1.5.0 — wrap in a card with the same SURFACE + ACCENT_DIM
+        // border treatment as every other Setup tab via
+        // `settings_card_local`. Was a bare column with no surface,
+        // reading "unfinished" against the rest of Setup.
+        let body: Element<'_, Message> = column![
             text("SolarFocus OS").size(FONT_TITLE).color(TEXT_PRIMARY),
-            text("v1.3.1").size(FONT_BODY).color(TEXT_SECONDARY),
+            text("v1.5.0").size(FONT_BODY).color(TEXT_SECONDARY),
             text(match self.settings.language {
                 Language::Es =>
                     "Productividad enfocada con IA local. Privacidad por diseño.",
@@ -4542,7 +4539,14 @@ impl App {
                 .color(TEXT_MUTED),
         ]
         .spacing(SPACE_SM as u16)
-        .into()
+        .into();
+        settings_card_local(
+            match self.settings.language {
+                Language::Es => "Acerca de",
+                Language::En => "About",
+            },
+            body,
+        )
     }
 
     /// UI-4: First-run wizard. Three pages: Welcome / Profile / Download.
