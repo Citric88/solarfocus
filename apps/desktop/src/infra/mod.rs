@@ -11,6 +11,9 @@ pub mod encryption;
 // 🗄️ Persistencia SQLite básica
 pub mod persistence;
 
+// 📤 v1.8.0 — JSON/CSV export to Downloads.
+pub mod export;
+
 // 🪟 v1.2: vigilancia de la ventana activa
 pub mod window_watch;
 

@@ -144,6 +144,17 @@ pub struct Settings {
     // calendar permission prompt.
     #[serde(default)]
     pub calendar_live_enabled: bool,
+
+    // v1.8.0 — minimum attention score (0-100) for a session to count as
+    // "valid". Below this threshold a session is recorded but flagged
+    // `is_valid=false`. Used by Stats to surface unrealistic streaks and
+    // — in v1.9.0 — to gate seed rewards. Default 60 = 2 distractions max.
+    #[serde(default = "default_min_attention")]
+    pub min_attention_for_valid_session: u8,
+}
+
+fn default_min_attention() -> u8 {
+    60
 }
 
 fn default_absent_threshold() -> u8 {
@@ -210,6 +221,7 @@ impl Default for Settings {
             next_deadline_at: None,
             next_deadline_label: String::new(),
             calendar_live_enabled: false,
+            min_attention_for_valid_session: default_min_attention(),
         }
     }
 }

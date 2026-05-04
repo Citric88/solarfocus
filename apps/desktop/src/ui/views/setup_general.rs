@@ -186,6 +186,58 @@ impl App {
             ..Default::default()
         });
 
+        let validity_card = {
+            let current = self.settings.min_attention_for_valid_session;
+            let opts: [u8; 5] = [0, 40, 60, 80, 100];
+            let mut chips_row = iced::widget::Row::new();
+            for &v in &opts {
+                let label = if v == 0 {
+                    match self.settings.language {
+                        Language::Es => "Todas".to_string(),
+                        Language::En => "All".to_string(),
+                    }
+                } else {
+                    format!("{}%", v)
+                };
+                chips_row = chips_row
+                    .push(chip(label, current == v, Message::SetMinAttention(v)));
+                chips_row = chips_row.push(iced::widget::Space::with_width(SPACE_XS as f32));
+            }
+            container(
+                column![
+                    text(match self.settings.language {
+                        Language::Es => "Atención mínima para validar",
+                        Language::En => "Minimum attention to count",
+                    })
+                    .size(FONT_BODY)
+                    .color(TEXT_PRIMARY),
+                    text(match self.settings.language {
+                        Language::Es => format!(
+                            "Una sesión cuenta como válida si su Atención ≥ {}%. Las inválidas se guardan pero quedan marcadas como No válida en Stats.",
+                            current
+                        ),
+                        Language::En => format!(
+                            "A session counts as valid if its Focus score is ≥ {}%. Invalid ones are still saved but flagged as Invalid in Stats.",
+                            current
+                        ),
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_SECONDARY),
+                    chips_row,
+                ]
+                .spacing(SPACE_XS as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
+
         let shortcuts = container(
             column![
                 text(match self.settings.language {
@@ -334,7 +386,11 @@ impl App {
         .into();
 
         let mut col = iced::widget::Column::new().spacing(SPACE_MD as u16);
-        col = col.push(lang_card).push(duration_card).push(ram_card);
+        col = col
+            .push(lang_card)
+            .push(duration_card)
+            .push(validity_card)
+            .push(ram_card);
         #[cfg(feature = "calendar")]
         {
             col = col.push(deadline_card);
