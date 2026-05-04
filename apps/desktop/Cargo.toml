@@ -37,9 +37,25 @@ tokenizers = { workspace = true, optional = true }
 nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-avfoundation"] }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
-# v1.3 Wave C — calendar awareness. v1.3.0 ships the pure free-block
-# algorithm + manual deadline input. v1.3.1 will add live EventKit
-# bindings (objc2-event-kit) for iCloud / Google / Exchange / Local.
+# v1.3 Wave C — read-only macOS calendar via EventKit (iCloud + Google
+# + Exchange + Local in one unified API).
+objc2 = { version = "0.5", optional = true }
+objc2-foundation = { version = "0.2", optional = true, features = [
+    "NSDate",
+    "NSArray",
+    "NSString",
+    "NSPredicate",
+    "NSError",
+] }
+objc2-event-kit = { version = "0.2", optional = true, features = [
+    "EKEventStore",
+    "EKEvent",
+    "EKCalendar",
+    "EKCalendarItem",
+    "EKObject",
+    "block2",
+] }
+block2 = { version = "0.5", optional = true }
 
 [features]
 default = []
@@ -62,18 +78,31 @@ classifier = [
     "dep:fs2",
 ]
 
-# v1.3 Wave B — camera-based presence detection. nokhwa for capture.
-# v1.3.0 ships brightness-change heuristic (no model dependency); v1.3.1
-# will add YuNet ONNX face detection.
+# v1.3 Wave B — camera-based presence detection. v1.3.0 shipped a
+# brightness-change heuristic; v1.3.1 layers YuNet ONNX face detection
+# on top — when the model file is present, PresenceProbe upgrades from
+# brightness to face yes/no. Still uses nokhwa for capture; reuses the
+# same ort + ndarray + reqwest stack already pulled in by `classifier`.
 presence = [
     "dep:nokhwa",
     "dep:image",
+    "dep:ort",
+    "dep:ndarray",
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:futures-util",
+    "dep:fs2",
 ]
 
-# v1.3 Wave C — calendar-aware focus suggestions. v1.3.0 ships the
-# free-block algorithm + manual deadline input (no extra deps);
-# v1.3.1 will add live EventKit reader behind the same feature flag.
-calendar = []
+# v1.3 Wave C — calendar-aware focus suggestions. v1.3.0 shipped the
+# free-block algorithm + manual deadline input. v1.3.1 adds the live
+# EventKit reader covering iCloud / Google / Exchange / Local.
+calendar = [
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-event-kit",
+    "dep:block2",
+]
 
 [[bin]]
 name = "solarfocus-desktop"

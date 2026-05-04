@@ -1,8 +1,8 @@
 //! User-tunable settings persisted as JSON in the OS config dir.
 //!
-//! macOS:   ~/Library/Application Support/SolarFocus/settings.json
-//! Linux:   ~/.config/solarfocus/settings.json
-//! Windows: %APPDATA%\SolarFocus\settings.json
+//! macOS:   ~/Library/Application Support/SolarFocus OS/settings.json
+//! Linux:   ~/.config/solarfocus-os/settings.json
+//! Windows: %APPDATA%\SolarFocus OS\settings.json
 //!
 //! Schema is additive — new fields use `#[serde(default)]` so old files keep working.
 
@@ -131,13 +131,19 @@ pub struct Settings {
     pub presence_absent_threshold: u8,
 
     // v1.3 Wave C — manual "next deadline" stored as RFC3339 local
-    // datetime + a label. v1.3.1 will replace this with a live
-    // EventKit feed; the field stays as a fallback when permission
-    // is denied or no calendar accounts are configured.
+    // datetime + a label. v1.3.1 added a live EventKit feed alongside
+    // it; this manual entry is still the fallback when EventKit is
+    // denied or no calendar accounts are configured.
     #[serde(default)]
     pub next_deadline_at: Option<String>,
     #[serde(default)]
     pub next_deadline_label: String,
+
+    // v1.3.1 — live calendar reader (EventKit). Off by default; the
+    // user opts in from Setup → General which triggers the macOS
+    // calendar permission prompt.
+    #[serde(default)]
+    pub calendar_live_enabled: bool,
 }
 
 fn default_absent_threshold() -> u8 {
@@ -203,6 +209,7 @@ impl Default for Settings {
             presence_absent_threshold: default_absent_threshold(),
             next_deadline_at: None,
             next_deadline_label: String::new(),
+            calendar_live_enabled: false,
         }
     }
 }

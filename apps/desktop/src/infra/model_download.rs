@@ -1,4 +1,4 @@
-#![cfg(any(feature = "llm", feature = "classifier"))]
+#![cfg(any(feature = "llm", feature = "classifier", feature = "presence"))]
 //! Model file downloader for the Phase 3 LLM tier (and Phase 4 classifier
 //! via the shared `download_file` helper).
 //!
@@ -57,7 +57,7 @@ pub fn manifest_for(choice: ModelChoice) -> Option<&'static ModelManifest> {
     MANIFESTS.iter().find(|m| m.id == choice)
 }
 
-/// `~/Library/Application Support/SolarFocus/models/` on macOS.
+/// `~/Library/Application Support/SolarFocus OS/models/` on macOS.
 pub fn models_dir() -> PathBuf {
     if let Some(p) = ProjectDirs::from("os", "SolarFocus", "SolarFocus") {
         p.data_dir().join("models")

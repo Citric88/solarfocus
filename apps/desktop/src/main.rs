@@ -83,6 +83,15 @@ pub enum Message {
     PresenceProbe,
     #[cfg(feature = "presence")]
     PresenceReady(Result<infra::presence::PresenceSample, String>),
+    // v1.3.1 — YuNet ONNX downloader for face detection.
+    #[cfg(feature = "presence")]
+    DownloadYunet,
+    #[cfg(feature = "presence")]
+    YunetDownloaded(Result<(), String>),
+    /// Verdict from a background YuNet inference (Present/Absent +
+    /// max face confidence + when it was captured).
+    #[cfg(feature = "presence")]
+    YunetVerdict(Result<(infra::presence::Presence, f32, chrono::DateTime<chrono::Local>), String>),
     // v1.3 Wave C — manual next-deadline input (label + HH:MM today).
     #[cfg(feature = "calendar")]
     SetDeadlineLabel(String),
@@ -90,6 +99,15 @@ pub enum Message {
     SetDeadlineTime(String),
     #[cfg(feature = "calendar")]
     ClearDeadline,
+    // v1.3.1 — live EventKit binding (toggle + access result + refresh).
+    #[cfg(feature = "calendar")]
+    ToggleCalendarLive(bool),
+    #[cfg(feature = "calendar")]
+    CalendarAccessResult(Result<bool, String>),
+    #[cfg(feature = "calendar")]
+    CalendarRefresh,
+    #[cfg(feature = "calendar")]
+    CalendarEventsLoaded(Result<Vec<infra::calendar::CalendarEvent>, String>),
     ThumbsUp,
     ThumbsDown,
 
@@ -220,6 +238,13 @@ pub struct App {
     // v1.3 Wave C — ephemeral input buffer for HH:MM today.
     #[cfg(feature = "calendar")]
     deadline_time_str: String,
+    // v1.3.1 — live EventKit reader (created lazily on first toggle).
+    #[cfg(feature = "calendar")]
+    calendar_reader: Option<std::sync::Arc<infra::calendar::ek::CalendarReader>>,
+    #[cfg(feature = "calendar")]
+    calendar_events: Vec<infra::calendar::CalendarEvent>,
+    #[cfg(feature = "calendar")]
+    calendar_error: Option<String>,
 
     // v1.3 Wave B — camera presence probe (lazy init on first toggle).
     // Wrapped in Arc<Mutex<>> because PresenceProbe is Send+Sync but
@@ -232,6 +257,16 @@ pub struct App {
     last_presence: Option<infra::presence::Presence>,
     #[cfg(feature = "presence")]
     presence_error: Option<String>,
+    /// v1.3.1 — last time we kicked off a YuNet inference, used to
+    /// throttle face detection to once every YUNET_THROTTLE_SECS while
+    /// the brightness path keeps polling at 1 Hz.
+    #[cfg(feature = "presence")]
+    last_yunet_at: Option<std::time::Instant>,
+    /// Most recent YuNet verdict + when the frame was captured. Used
+    /// alongside brightness so a stale "face seen" doesn't block an
+    /// auto-pause indefinitely.
+    #[cfg(feature = "presence")]
+    last_yunet: Option<(infra::presence::Presence, chrono::DateTime<chrono::Local>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,7 +375,7 @@ impl App {
         let classifier = build_classifier(&settings);
 
         log::info!(
-            "v1.2.0-rc3 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
+            "v1.3.1 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
             settings.ai_enabled,
             settings.language,
             settings.window_poll_secs,
@@ -447,6 +482,12 @@ impl App {
                 custom_category_str,
                 #[cfg(feature = "calendar")]
                 deadline_time_str: initial_deadline_str,
+                #[cfg(feature = "calendar")]
+                calendar_reader: None,
+                #[cfg(feature = "calendar")]
+                calendar_events: Vec::new(),
+                #[cfg(feature = "calendar")]
+                calendar_error: None,
                 #[cfg(feature = "presence")]
                 presence_probe: None,
                 #[cfg(feature = "presence")]
@@ -455,6 +496,10 @@ impl App {
                 last_presence: None,
                 #[cfg(feature = "presence")]
                 presence_error: None,
+                #[cfg(feature = "presence")]
+                last_yunet_at: None,
+                #[cfg(feature = "presence")]
+                last_yunet: None,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).
@@ -463,6 +508,12 @@ impl App {
                 let mut tasks = vec![Task::done(Message::ProbePermission)];
                 if should_attempt_llm_load(&Settings::load()) {
                     tasks.push(Task::done(Message::SpawnEngineLoad));
+                }
+                // v1.3.1 — if the user previously enabled live calendar
+                // and granted permission, kick off an initial refresh.
+                #[cfg(feature = "calendar")]
+                if Settings::load().calendar_live_enabled {
+                    tasks.push(Task::done(Message::ToggleCalendarLive(true)));
                 }
                 Task::batch(tasks)
             },
@@ -738,6 +789,14 @@ impl App {
         {
             subs.push(
                 iced::time::every(Duration::from_secs(1)).map(|_| Message::PresenceProbe),
+            );
+        }
+
+        // v1.3.1 — calendar refresh once per minute while live mode is on.
+        #[cfg(feature = "calendar")]
+        if self.settings.calendar_live_enabled && self.calendar_reader.is_some() {
+            subs.push(
+                iced::time::every(Duration::from_secs(60)).map(|_| Message::CalendarRefresh),
             );
         }
 
@@ -1274,15 +1333,110 @@ impl App {
             }
             #[cfg(feature = "presence")]
             Message::PresenceProbe => {
-                // Poll synchronously — capture + brightness mean takes
-                // <30 ms on M-series, fast enough for the UI thread at
-                // 1 Hz. Avoids Send bounds on macOS Camera handles.
+                // Capture + brightness on the UI thread (~5 ms total).
+                // YuNet inference is throttled to once every 3 s and
+                // runs on tokio::task::spawn_blocking so it never
+                // blocks the UI even when each call costs ~200 ms on
+                // CPU at 640×640.
+                const YUNET_THROTTLE_SECS: u64 = 3;
                 if let Some(probe) = self.presence_probe.as_ref() {
-                    let result = probe.poll().map_err(|e| e.to_string());
-                    Task::done(Message::PresenceReady(result))
+                    let probe = probe.clone();
+                    match probe.poll() {
+                        Ok((sample, captured)) => {
+                            let captured_at = sample.captured_at;
+                            let immediate = Task::done(Message::PresenceReady(Ok(sample)));
+                            let now = std::time::Instant::now();
+                            let throttle_ok = self
+                                .last_yunet_at
+                                .map(|t| now.duration_since(t).as_secs() >= YUNET_THROTTLE_SECS)
+                                .unwrap_or(true);
+                            if let Some(engine) = probe.yunet_engine() {
+                                if throttle_ok {
+                                    self.last_yunet_at = Some(now);
+                                    let bg = Task::perform(
+                                        async move {
+                                            tokio::task::spawn_blocking(move || {
+                                                let mut g = match engine.lock() {
+                                                    Ok(g) => g,
+                                                    Err(_) => return Err("yunet poisoned".to_string()),
+                                                };
+                                                g.infer(
+                                                    &captured.bytes,
+                                                    captured.width,
+                                                    captured.height,
+                                                )
+                                            })
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                            .and_then(|r| r)
+                                            .map(|(p, c)| (p, c, captured_at))
+                                        },
+                                        Message::YunetVerdict,
+                                    );
+                                    return Task::batch(vec![immediate, bg]);
+                                }
+                            }
+                            immediate
+                        }
+                        Err(e) => Task::done(Message::PresenceReady(Err(e.to_string()))),
+                    }
                 } else {
                     Task::none()
                 }
+            }
+            #[cfg(feature = "presence")]
+            Message::YunetVerdict(result) => {
+                use infra::presence::Presence;
+                match result {
+                    Ok((p, conf, captured_at)) => {
+                        log::info!(
+                            "YuNet verdict: {:?} score={:.3} at {}",
+                            p,
+                            conf,
+                            captured_at.format("%H:%M:%S")
+                        );
+                        self.last_yunet = Some((p, captured_at));
+                        // YuNet is the more reliable signal — when it
+                        // disagrees with brightness, prefer YuNet for
+                        // the auto-pause counter.
+                        match p {
+                            Presence::Absent => {
+                                self.consecutive_absent_samples =
+                                    self.consecutive_absent_samples.saturating_add(1);
+                                let threshold = self.settings.presence_absent_threshold.max(1);
+                                if self.consecutive_absent_samples >= threshold
+                                    && matches!(
+                                        self.pomodoro_engine.state(),
+                                        SolarFocusCore::AppState::Focusing(_)
+                                    )
+                                    && !self.pomodoro_engine.is_paused()
+                                {
+                                    self.pomodoro_engine.pause(0.0);
+                                    log::info!(
+                                        "Presence (YuNet): auto-paused after {} Absent samples",
+                                        self.consecutive_absent_samples
+                                    );
+                                    self.toast = Some(Toast {
+                                        text: match self.settings.language {
+                                            Language::Es =>
+                                                "Pausado: te alejaste del escritorio.".to_string(),
+                                            Language::En =>
+                                                "Paused: you stepped away.".to_string(),
+                                        },
+                                        expires_at: Instant::now() + Duration::from_secs(4),
+                                    });
+                                }
+                            }
+                            Presence::Present | Presence::Unknown => {
+                                self.consecutive_absent_samples = 0;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("YuNet inference error (background): {}", e);
+                    }
+                }
+                Task::none()
             }
             // v1.3 Wave C — manual next-deadline input handlers.
             #[cfg(feature = "calendar")]
@@ -1323,13 +1477,129 @@ impl App {
                 self.settings.save();
                 Task::none()
             }
+            // v1.3.1 — live EventKit toggle. macOS Calendar permission
+            // prompt is synchronous via EventKit's barrier-based wait;
+            // the first call typically returns within ~100 ms (or
+            // longer if the user is reading the prompt). Run on UI
+            // thread to avoid Send bounds on Retained<EKEventStore>.
+            #[cfg(feature = "calendar")]
+            Message::ToggleCalendarLive(on) => {
+                self.settings.calendar_live_enabled = on;
+                self.settings.save();
+                self.calendar_error = None;
+                if on {
+                    if self.calendar_reader.is_none() {
+                        self.calendar_reader = Some(std::sync::Arc::new(
+                            infra::calendar::ek::CalendarReader::new(),
+                        ));
+                    }
+                    let reader = self.calendar_reader.as_ref().unwrap().clone();
+                    let result = reader.request_access().map_err(|e| e.to_string());
+                    Task::done(Message::CalendarAccessResult(result))
+                } else {
+                    self.calendar_events.clear();
+                    Task::none()
+                }
+            }
+            #[cfg(feature = "calendar")]
+            Message::CalendarAccessResult(result) => match result {
+                Ok(true) => {
+                    log::info!("Calendar: access granted");
+                    Task::done(Message::CalendarRefresh)
+                }
+                Ok(false) => {
+                    log::info!("Calendar: access denied");
+                    self.settings.calendar_live_enabled = false;
+                    self.settings.save();
+                    self.calendar_error = Some(match self.settings.language {
+                        Language::Es => "Permiso de calendario denegado.".into(),
+                        Language::En => "Calendar permission denied.".into(),
+                    });
+                    Task::none()
+                }
+                Err(e) => {
+                    log::warn!("Calendar: access error: {}", e);
+                    self.calendar_error = Some(e);
+                    self.settings.calendar_live_enabled = false;
+                    self.settings.save();
+                    Task::none()
+                }
+            },
+            #[cfg(feature = "calendar")]
+            Message::CalendarRefresh => {
+                use infra::calendar::CalendarSource;
+                if let Some(reader) = self.calendar_reader.as_ref() {
+                    let result = reader.events_today().map_err(|e| e.to_string());
+                    Task::done(Message::CalendarEventsLoaded(result))
+                } else {
+                    Task::none()
+                }
+            }
+            #[cfg(feature = "calendar")]
+            Message::CalendarEventsLoaded(result) => {
+                match result {
+                    Ok(events) => {
+                        log::info!("Calendar: {} events loaded today", events.len());
+                        self.calendar_events = events;
+                        self.calendar_error = None;
+                    }
+                    Err(e) => {
+                        log::warn!("Calendar: load error: {}", e);
+                        self.calendar_error = Some(e);
+                    }
+                }
+                Task::none()
+            }
+            // v1.3.1 — YuNet model download (337 KB). User-triggered
+            // from the Setup → IA presence card.
+            #[cfg(feature = "presence")]
+            Message::DownloadYunet => {
+                use infra::yunet_download;
+                if yunet_download::is_present() {
+                    return Task::done(Message::YunetDownloaded(Ok(())));
+                }
+                Task::perform(
+                    async move { yunet_download::download().await.map_err(|e| e.to_string()) },
+                    Message::YunetDownloaded,
+                )
+            }
+            #[cfg(feature = "presence")]
+            Message::YunetDownloaded(result) => {
+                match result {
+                    Ok(()) => {
+                        log::info!("YuNet: download complete");
+                        // Force probe re-init so it picks up the new model.
+                        if self.settings.presence_enabled {
+                            self.presence_probe = None;
+                            return Task::done(Message::TogglePresence(true));
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("YuNet: download failed: {}", e);
+                        self.presence_error = Some(e);
+                    }
+                }
+                Task::none()
+            }
             #[cfg(feature = "presence")]
             Message::PresenceReady(result) => {
-                use infra::presence::Presence;
+                use infra::presence::{DetectionMode, Presence};
                 match result {
                     Ok(sample) => {
                         self.last_presence = Some(sample.presence);
                         self.presence_error = None;
+                        // When YuNet is the active mode, the brightness
+                        // path is informational only — YuNet drives the
+                        // auto-pause counter via Message::YunetVerdict
+                        // because brightness is too noisy to act on.
+                        let yunet_active = self
+                            .presence_probe
+                            .as_ref()
+                            .map(|p| p.mode() == DetectionMode::YunetFace)
+                            .unwrap_or(false);
+                        if yunet_active {
+                            return Task::none();
+                        }
                         match sample.presence {
                             Presence::Absent => {
                                 self.consecutive_absent_samples =
@@ -2104,8 +2374,8 @@ impl App {
         let lang = self.settings.language;
 
         let title = text(match lang {
-            Language::Es => "¿Qué es SolarFocus?",
-            Language::En => "What is SolarFocus?",
+            Language::Es => "¿Qué es SolarFocus OS?",
+            Language::En => "What is SolarFocus OS?",
         })
         .size(FONT_TITLE)
         .color(TEXT_PRIMARY);
@@ -2281,10 +2551,10 @@ impl App {
                 pick("Cómo funciona: cada sesión completada se guarda en SQLite local con timestamp y duración. \
                       La pestaña Stats agrega contadores de hoy, esta semana y total histórico, más una gráfica \
                       de minutos por día para los últimos 7 días. La base de datos vive en \
-                      ~/Library/Application Support/SolarFocus.",
+                      ~/Library/Application Support/SolarFocus OS.",
                      "How it works: each completed session is saved to local SQLite with timestamp and duration. \
                       The Stats tab aggregates today, week, and lifetime counters plus a 7-day minutes-per-day chart. \
-                      The database lives in ~/Library/Application Support/SolarFocus.")),
+                      The database lives in ~/Library/Application Support/SolarFocus OS.")),
         ]
         .spacing(SPACE_SM as u16);
 
@@ -2808,56 +3078,78 @@ impl App {
         use ui::palette::*;
         #[cfg(feature = "calendar")]
         {
-            if let Some(s) = self.settings.next_deadline_at.as_deref() {
-                if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) {
-                    let when = parsed.with_timezone(&chrono::Local);
-                    let now = chrono::Local::now();
-                    let delta = when - now;
-                    if delta.num_seconds() > 0 {
-                        let mins = delta.num_minutes();
-                        let h = mins / 60;
-                        let m = mins % 60;
-                        let label = if !self.settings.next_deadline_label.is_empty() {
-                            format!(
-                                "{} \"{}\" {} {}h{:02}m",
-                                match self.settings.language {
-                                    Language::Es => "Próximo:",
-                                    Language::En => "Next:",
-                                },
-                                self.settings.next_deadline_label,
-                                match self.settings.language {
-                                    Language::Es => "en",
-                                    Language::En => "in",
-                                },
-                                h,
-                                m,
+            // v1.3.1 — prefer the live EventKit next-event over the
+            // manual deadline if both are present.
+            let now = chrono::Local::now();
+            let live_next: Option<(String, chrono::DateTime<chrono::Local>)> =
+                infra::calendar::next_event(&self.calendar_events, now)
+                    .map(|e| (e.title.clone(), e.start));
+            let manual_next: Option<(String, chrono::DateTime<chrono::Local>)> =
+                self.settings.next_deadline_at.as_deref().and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| {
+                            (
+                                self.settings.next_deadline_label.clone(),
+                                d.with_timezone(&chrono::Local),
                             )
-                        } else {
-                            format!(
-                                "{} {}h{:02}m",
-                                match self.settings.language {
-                                    Language::Es => "Próxima reunión en",
-                                    Language::En => "Next meeting in",
-                                },
-                                h,
-                                m,
-                            )
-                        };
-                        return container(
-                            text(label).size(FONT_SMALL).color(TEXT_SECONDARY),
-                        )
-                        .padding([4, 12])
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(SURFACE_RAISED)),
-                            border: iced::Border {
-                                radius: 6.0.into(),
-                                width: 1.0,
-                                color: ACCENT_DIM,
-                            },
-                            ..Default::default()
                         })
-                        .into();
-                    }
+                });
+            // Pick whichever is nearer in the future.
+            let candidate = match (live_next, manual_next) {
+                (Some(a), Some(b)) => {
+                    if a.1 <= b.1 { Some(a) } else { Some(b) }
+                }
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            if let Some((label, when)) = candidate {
+                let delta = when - now;
+                if delta.num_seconds() > 0 {
+                    let mins = delta.num_minutes();
+                    let h = mins / 60;
+                    let m = mins % 60;
+                    let pretty = if !label.is_empty() {
+                        format!(
+                            "{} \"{}\" {} {}h{:02}m",
+                            match self.settings.language {
+                                Language::Es => "Próximo:",
+                                Language::En => "Next:",
+                            },
+                            label,
+                            match self.settings.language {
+                                Language::Es => "en",
+                                Language::En => "in",
+                            },
+                            h,
+                            m,
+                        )
+                    } else {
+                        format!(
+                            "{} {}h{:02}m",
+                            match self.settings.language {
+                                Language::Es => "Próxima reunión en",
+                                Language::En => "Next meeting in",
+                            },
+                            h,
+                            m,
+                        )
+                    };
+                    return container(
+                        text(pretty).size(FONT_SMALL).color(TEXT_SECONDARY),
+                    )
+                    .padding([4, 12])
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(SURFACE_RAISED)),
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            width: 1.0,
+                            color: ACCENT_DIM,
+                        },
+                        ..Default::default()
+                    })
+                    .into();
                 }
             }
         }
@@ -3246,10 +3538,66 @@ impl App {
             ..Default::default()
         });
 
-        // v1.3 Wave C — manual deadline card. Lets the user type a
-        // label + HH:MM today; the timer canvas surfaces a badge with
-        // "X in Yh Zm" until the deadline passes. v1.3.1 will replace
-        // this with live EventKit data.
+        // v1.3 Wave C — calendar card combining the v1.3.1 live
+        // EventKit toggle with the manual fallback for users who
+        // decline calendar permission.
+        #[cfg(feature = "calendar")]
+        let live_toggle_row: Element<'_, Message> = iced::widget::row![
+            text(if self.settings.calendar_live_enabled {
+                match self.settings.language {
+                    Language::Es => "Lectura de Calendar (iCloud / Google / Local): activa",
+                    Language::En => "Calendar (iCloud / Google / Local) live: enabled",
+                }
+            } else {
+                match self.settings.language {
+                    Language::Es => "Lectura de Calendar (iCloud / Google / Local): desactivada",
+                    Language::En => "Calendar (iCloud / Google / Local) live: disabled",
+                }
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_PRIMARY),
+            iced::widget::horizontal_space(),
+            chip_local(
+                if self.settings.calendar_live_enabled {
+                    match self.settings.language {
+                        Language::Es => "Desactivar".to_string(),
+                        Language::En => "Disable".to_string(),
+                    }
+                } else {
+                    match self.settings.language {
+                        Language::Es => "Activar".to_string(),
+                        Language::En => "Enable".to_string(),
+                    }
+                },
+                false,
+                Message::ToggleCalendarLive(!self.settings.calendar_live_enabled),
+            ),
+        ]
+        .into();
+
+        #[cfg(feature = "calendar")]
+        let calendar_status: Element<'_, Message> = if let Some(err) = &self.calendar_error {
+            text(err.clone()).size(FONT_TINY).color(DANGER).into()
+        } else if self.settings.calendar_live_enabled {
+            text(format!(
+                "{} {} {}",
+                match self.settings.language {
+                    Language::Es => "Eventos de hoy:",
+                    Language::En => "Today's events:",
+                },
+                self.calendar_events.len(),
+                match self.settings.language {
+                    Language::Es => if self.calendar_events.len() == 1 { "evento" } else { "eventos" },
+                    Language::En => if self.calendar_events.len() == 1 { "event" } else { "events" },
+                },
+            ))
+            .size(FONT_TINY)
+            .color(TEXT_MUTED)
+            .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         #[cfg(feature = "calendar")]
         let deadline_card: Element<'_, Message> = container(
             column![
@@ -3258,6 +3606,14 @@ impl App {
                     Language::En => "Next meeting / deadline",
                 })
                 .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                live_toggle_row,
+                calendar_status,
+                text(match self.settings.language {
+                    Language::Es => "O introduce un deadline manual (se usa si el calendario está desactivado o no hay eventos):",
+                    Language::En => "Or enter a manual deadline (used when live calendar is off or empty):",
+                })
+                .size(FONT_TINY)
                 .color(TEXT_MUTED),
                 iced::widget::row![
                     iced::widget::text_input(
@@ -3287,12 +3643,6 @@ impl App {
                         Message::ClearDeadline,
                     ),
                 ],
-                text(match self.settings.language {
-                    Language::Es => "v1.3.0: entrada manual. v1.3.1 leerá tu Calendar (iCloud, Google, Exchange) automáticamente.",
-                    Language::En => "v1.3.0: manual entry. v1.3.1 will read your Calendar (iCloud, Google, Exchange) automatically.",
-                })
-                .size(FONT_TINY)
-                .color(TEXT_MUTED),
             ]
             .spacing(SPACE_SM as u16),
         )
@@ -3764,7 +4114,7 @@ impl App {
         use ui::palette::*;
         column![
             text("SolarFocus OS").size(FONT_TITLE).color(TEXT_PRIMARY),
-            text("v1.2.0-rc2").size(FONT_BODY).color(TEXT_SECONDARY),
+            text("v1.3.1").size(FONT_BODY).color(TEXT_SECONDARY),
             text(match self.settings.language {
                 Language::Es =>
                     "Productividad enfocada con IA local. Privacidad por diseño.",
@@ -4481,6 +4831,29 @@ impl App {
                         pick("—", "—").to_string()
                     }
                 };
+                let yunet_present = infra::yunet_download::is_present();
+                let mode_label = match (self.presence_probe.as_ref(), yunet_present) {
+                    (Some(p), _) => match p.mode() {
+                        infra::presence::DetectionMode::YunetFace =>
+                            pick("Detección facial (YuNet)", "Face detection (YuNet)").to_string(),
+                        infra::presence::DetectionMode::Brightness =>
+                            pick("Heurística por luminosidad", "Brightness heuristic").to_string(),
+                    },
+                    (None, true) => pick("YuNet listo (cámara desactivada)", "YuNet ready (camera off)").to_string(),
+                    (None, false) => pick("Heurística por luminosidad (sin YuNet)", "Brightness heuristic (no YuNet)").to_string(),
+                };
+                let yunet_action: Element<'_, Message> = if yunet_present {
+                    text(pick("✓ YuNet descargado (~337 KB)", "✓ YuNet downloaded (~337 KB)"))
+                        .size(FONT_TINY)
+                        .color(ACCENT)
+                        .into()
+                } else {
+                    chip_local(
+                        pick("Descargar YuNet (~337 KB)", "Download YuNet (~337 KB)").to_string(),
+                        false,
+                        Message::DownloadYunet,
+                    )
+                };
                 column![
                     iced::widget::row![
                         text(if self.settings.presence_enabled {
@@ -4508,9 +4881,17 @@ impl App {
                     ))
                     .size(FONT_TINY)
                     .color(TEXT_MUTED),
+                    text(format!(
+                        "{}: {}",
+                        pick("Modo", "Mode"),
+                        mode_label,
+                    ))
+                    .size(FONT_TINY)
+                    .color(TEXT_MUTED),
+                    yunet_action,
                     text(pick(
-                        "v1.3.0 usa un detector por luminosidad (cambios bruscos = ausente). v1.3.1 añadirá detección facial con YuNet ONNX.",
-                        "v1.3.0 uses a brightness-change detector (sharp swings = absent). v1.3.1 will add YuNet ONNX face detection.",
+                        "Sin YuNet: detección por cambios bruscos de luz. Con YuNet: detección facial real (foto se descarta tras la inferencia).",
+                        "Without YuNet: detection via sharp light swings. With YuNet: actual face detection (frame discarded after inference).",
                     ))
                     .size(FONT_TINY)
                     .color(TEXT_MUTED),

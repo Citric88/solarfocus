@@ -18,7 +18,8 @@ pub mod window_watch;
 pub mod settings;
 
 // 🧠 v1.2 Phase 3+4: download stack (shared by llm + classifier features).
-#[cfg(any(feature = "llm", feature = "classifier"))]
+// v1.3.1 — also pulled in by `presence` for the YuNet ONNX downloader.
+#[cfg(any(feature = "llm", feature = "classifier", feature = "presence"))]
 pub mod model_download;
 
 // 🧠 v1.2 Phase 3: LLM tier (feature-gated)
@@ -36,6 +37,8 @@ pub mod distilbert_download;
 // 📷 v1.3 Wave B: camera-based presence detection (feature-gated).
 #[cfg(feature = "presence")]
 pub mod presence;
+#[cfg(feature = "presence")]
+pub mod yunet_download;
 
 // 📅 v1.3 Wave C: read-only macOS calendar awareness (feature-gated).
 #[cfg(feature = "calendar")]

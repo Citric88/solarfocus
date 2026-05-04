@@ -114,20 +114,15 @@ fn end_of_today(now: DateTime<Local>) -> DateTime<Local> {
         .unwrap_or(now)
 }
 
-// --- macOS EventKit reader ---------------------------------------------
-//
-// v1.3.0 ships the pure algorithm + a manual "next deadline" text input
-// in the UI. Live EventKit access (iCloud / Google / Exchange / Local
-// via `objc2-event-kit`) lands in v1.3.1 once the binding's selector
-// surface is fully exercised. The interface below is the contract the
-// live reader will satisfy.
+// --- Calendar source contract ------------------------------------------
+
 pub trait CalendarSource {
     fn events_today(&self) -> Result<Vec<CalendarEvent>, CalendarError>;
 }
 
-/// v1.3.0 fallback: a single user-typed deadline turned into a fake
-/// 30-minute event so `find_next_free_block` and `next_event` work
-/// the same way against it as they will against live EventKit data.
+/// Manual fallback used when EventKit access is denied or unavailable.
+/// A single user-typed deadline turned into a fake 30-minute event so
+/// `find_next_free_block` and `next_event` work uniformly against it.
 pub struct ManualDeadlineSource {
     pub label: String,
     pub when: DateTime<Local>,
@@ -141,6 +136,134 @@ impl CalendarSource for ManualDeadlineSource {
             end: self.when + chrono::Duration::minutes(30),
             source: "Manual".to_string(),
         }])
+    }
+}
+
+// --- macOS EventKit live reader (v1.3.1) -------------------------------
+
+#[cfg(target_os = "macos")]
+pub mod ek {
+    use super::{CalendarError, CalendarEvent, CalendarSource};
+    use chrono::{DateTime, Duration as CDur, Local, NaiveTime, TimeZone};
+    use std::sync::{Arc, Mutex};
+
+    /// Seconds between Unix epoch (1970-01-01) and macOS reference
+    /// date (2001-01-01) — used for NSDate ↔ chrono conversion.
+    const UNIX_TO_REF: f64 = 978_307_200.0;
+
+    /// Live read-only EventKit reader. Wraps an `EKEventStore` and
+    /// pulls today's events across **all** synced calendars (iCloud,
+    /// Google synced via Calendar.app, Exchange, Local) in one query.
+    pub struct CalendarReader {
+        store: objc2::rc::Retained<objc2_event_kit::EKEventStore>,
+        access_granted: Arc<Mutex<Option<bool>>>,
+    }
+
+    impl CalendarReader {
+        pub fn new() -> Self {
+            // SAFETY: EKEventStore::new is a standard alloc + init.
+            let store = unsafe { objc2_event_kit::EKEventStore::new() };
+            Self {
+                store,
+                access_granted: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Request full read access. Blocks the calling thread until
+        /// the user responds via the macOS permission prompt — caller
+        /// must NOT run this on the UI thread.
+        pub fn request_access(&self) -> Result<bool, CalendarError> {
+            use objc2::runtime::Bool;
+            let granted = self.access_granted.clone();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let barrier_cb = barrier.clone();
+
+            let block = block2::RcBlock::new(
+                move |ok: Bool, _err: *mut objc2_foundation::NSError| {
+                    *granted.lock().unwrap() = Some(ok.as_bool());
+                    barrier_cb.wait();
+                },
+            );
+            // SAFETY: requestFullAccessToEventsWithCompletion: schedules
+            // the completion on a background queue. We park the calling
+            // thread on a Barrier until it fires. The block stays alive
+            // until the barrier is released.
+            unsafe {
+                let raw = &*block as *const block2::Block<dyn Fn(Bool, *mut objc2_foundation::NSError)>
+                    as *mut _;
+                self.store.requestFullAccessToEventsWithCompletion(raw);
+            }
+            barrier.wait();
+            Ok(self.access_granted.lock().unwrap().unwrap_or(false))
+        }
+    }
+
+    impl CalendarSource for CalendarReader {
+        fn events_today(&self) -> Result<Vec<CalendarEvent>, CalendarError> {
+            // [today 00:00:00 local, tomorrow 00:00:00 local)
+            let today = Local::now().date_naive();
+            let start_local = Local
+                .from_local_datetime(&today.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()))
+                .single()
+                .ok_or_else(|| {
+                    CalendarError::Unavailable("could not compute today start".into())
+                })?;
+            let end_local = start_local + CDur::days(1);
+
+            let start_ns = to_ns_date(start_local);
+            let end_ns = to_ns_date(end_local);
+
+            // SAFETY: predicateForEvents:endDate:calendars: returns an
+            // autoreleased NSPredicate. eventsMatchingPredicate: returns
+            // an NSArray<EKEvent>.
+            let events_array = unsafe {
+                let predicate = self
+                    .store
+                    .predicateForEventsWithStartDate_endDate_calendars(
+                        &start_ns, &end_ns, None,
+                    );
+                self.store.eventsMatchingPredicate(&predicate)
+            };
+
+            let mut out = Vec::with_capacity(events_array.len());
+            for ev in &events_array {
+                // SAFETY: title/startDate/endDate return non-null
+                // Retained<> on returned events. calendar() may be None.
+                unsafe {
+                    let raw_title = ev.title().to_string();
+                    let title = if raw_title.trim().is_empty() {
+                        "(sin título)".to_string()
+                    } else {
+                        raw_title
+                    };
+                    let start = from_ns_date(&ev.startDate());
+                    let end = from_ns_date(&ev.endDate());
+                    let source = ev
+                        .calendar()
+                        .map(|c| c.title().to_string())
+                        .unwrap_or_else(|| "Local".into());
+                    out.push(CalendarEvent { title, start, end, source });
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    fn to_ns_date(dt: DateTime<Local>) -> objc2::rc::Retained<objc2_foundation::NSDate> {
+        let unix_secs = dt.timestamp() as f64
+            + dt.timestamp_subsec_nanos() as f64 / 1e9;
+        let interval = unix_secs - UNIX_TO_REF;
+        unsafe {
+            objc2_foundation::NSDate::dateWithTimeIntervalSinceReferenceDate(interval)
+        }
+    }
+
+    fn from_ns_date(d: &objc2_foundation::NSDate) -> DateTime<Local> {
+        let interval = unsafe { d.timeIntervalSinceReferenceDate() };
+        let unix_secs = interval + UNIX_TO_REF;
+        let secs = unix_secs.trunc() as i64;
+        let nanos = ((unix_secs.fract()) * 1e9).abs() as u32;
+        Local.timestamp_opt(secs, nanos).single().unwrap_or_else(Local::now)
     }
 }
 
