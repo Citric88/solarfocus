@@ -83,6 +83,11 @@ pub enum Message {
     PresenceProbe,
     #[cfg(feature = "presence")]
     PresenceReady(Result<infra::presence::PresenceSample, String>),
+    // v1.3.1 — YuNet ONNX downloader for face detection.
+    #[cfg(feature = "presence")]
+    DownloadYunet,
+    #[cfg(feature = "presence")]
+    YunetDownloaded(Result<(), String>),
     // v1.3 Wave C — manual next-deadline input (label + HH:MM today).
     #[cfg(feature = "calendar")]
     SetDeadlineLabel(String),
@@ -1428,6 +1433,37 @@ impl App {
                     Err(e) => {
                         log::warn!("Calendar: load error: {}", e);
                         self.calendar_error = Some(e);
+                    }
+                }
+                Task::none()
+            }
+            // v1.3.1 — YuNet model download (337 KB). User-triggered
+            // from the Setup → IA presence card.
+            #[cfg(feature = "presence")]
+            Message::DownloadYunet => {
+                use infra::yunet_download;
+                if yunet_download::is_present() {
+                    return Task::done(Message::YunetDownloaded(Ok(())));
+                }
+                Task::perform(
+                    async move { yunet_download::download().await.map_err(|e| e.to_string()) },
+                    Message::YunetDownloaded,
+                )
+            }
+            #[cfg(feature = "presence")]
+            Message::YunetDownloaded(result) => {
+                match result {
+                    Ok(()) => {
+                        log::info!("YuNet: download complete");
+                        // Force probe re-init so it picks up the new model.
+                        if self.settings.presence_enabled {
+                            self.presence_probe = None;
+                            return Task::done(Message::TogglePresence(true));
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("YuNet: download failed: {}", e);
+                        self.presence_error = Some(e);
                     }
                 }
                 Task::none()
@@ -4670,6 +4706,29 @@ impl App {
                         pick("—", "—").to_string()
                     }
                 };
+                let yunet_present = infra::yunet_download::is_present();
+                let mode_label = match (self.presence_probe.as_ref(), yunet_present) {
+                    (Some(p), _) => match p.mode() {
+                        infra::presence::DetectionMode::YunetFace =>
+                            pick("Detección facial (YuNet)", "Face detection (YuNet)").to_string(),
+                        infra::presence::DetectionMode::Brightness =>
+                            pick("Heurística por luminosidad", "Brightness heuristic").to_string(),
+                    },
+                    (None, true) => pick("YuNet listo (cámara desactivada)", "YuNet ready (camera off)").to_string(),
+                    (None, false) => pick("Heurística por luminosidad (sin YuNet)", "Brightness heuristic (no YuNet)").to_string(),
+                };
+                let yunet_action: Element<'_, Message> = if yunet_present {
+                    text(pick("✓ YuNet descargado (~337 KB)", "✓ YuNet downloaded (~337 KB)"))
+                        .size(FONT_TINY)
+                        .color(ACCENT)
+                        .into()
+                } else {
+                    chip_local(
+                        pick("Descargar YuNet (~337 KB)", "Download YuNet (~337 KB)").to_string(),
+                        false,
+                        Message::DownloadYunet,
+                    )
+                };
                 column![
                     iced::widget::row![
                         text(if self.settings.presence_enabled {
@@ -4697,9 +4756,17 @@ impl App {
                     ))
                     .size(FONT_TINY)
                     .color(TEXT_MUTED),
+                    text(format!(
+                        "{}: {}",
+                        pick("Modo", "Mode"),
+                        mode_label,
+                    ))
+                    .size(FONT_TINY)
+                    .color(TEXT_MUTED),
+                    yunet_action,
                     text(pick(
-                        "v1.3.0 usa un detector por luminosidad (cambios bruscos = ausente). v1.3.1 añadirá detección facial con YuNet ONNX.",
-                        "v1.3.0 uses a brightness-change detector (sharp swings = absent). v1.3.1 will add YuNet ONNX face detection.",
+                        "Sin YuNet: detección por cambios bruscos de luz. Con YuNet: detección facial real (foto se descarta tras la inferencia).",
+                        "Without YuNet: detection via sharp light swings. With YuNet: actual face detection (frame discarded after inference).",
                     ))
                     .size(FONT_TINY)
                     .color(TEXT_MUTED),

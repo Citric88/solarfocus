@@ -1,4 +1,4 @@
-#![cfg(any(feature = "llm", feature = "classifier"))]
+#![cfg(any(feature = "llm", feature = "classifier", feature = "presence"))]
 //! Model file downloader for the Phase 3 LLM tier (and Phase 4 classifier
 //! via the shared `download_file` helper).
 //!

@@ -78,12 +78,20 @@ classifier = [
     "dep:fs2",
 ]
 
-# v1.3 Wave B — camera-based presence detection. nokhwa for capture.
-# v1.3.0 ships brightness-change heuristic (no model dependency); v1.3.1
-# will add YuNet ONNX face detection.
+# v1.3 Wave B — camera-based presence detection. v1.3.0 shipped a
+# brightness-change heuristic; v1.3.1 layers YuNet ONNX face detection
+# on top — when the model file is present, PresenceProbe upgrades from
+# brightness to face yes/no. Still uses nokhwa for capture; reuses the
+# same ort + ndarray + reqwest stack already pulled in by `classifier`.
 presence = [
     "dep:nokhwa",
     "dep:image",
+    "dep:ort",
+    "dep:ndarray",
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:futures-util",
+    "dep:fs2",
 ]
 
 # v1.3 Wave C — calendar-aware focus suggestions. v1.3.0 shipped the
