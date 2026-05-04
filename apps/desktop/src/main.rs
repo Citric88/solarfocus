@@ -1388,8 +1388,13 @@ impl App {
             Message::YunetVerdict(result) => {
                 use infra::presence::Presence;
                 match result {
-                    Ok((p, _conf, captured_at)) => {
-                        log::debug!("YuNet verdict: {:?} at {}", p, captured_at);
+                    Ok((p, conf, captured_at)) => {
+                        log::info!(
+                            "YuNet verdict: {:?} score={:.3} at {}",
+                            p,
+                            conf,
+                            captured_at.format("%H:%M:%S")
+                        );
                         self.last_yunet = Some((p, captured_at));
                         // YuNet is the more reliable signal — when it
                         // disagrees with brightness, prefer YuNet for

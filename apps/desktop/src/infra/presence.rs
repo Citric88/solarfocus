@@ -144,22 +144,57 @@ impl YunetEngine {
             .session
             .run(ort::inputs![input_name.as_str() => input_value])
             .map_err(|e| e.to_string())?;
-        let mut max_score = 0f32;
-        for (_, val) in outputs.iter() {
+        // YuNet 2023mar emits per-stride tensors:
+        //   cls_{8,16,32} — per-anchor face *class* probability.
+        //     This is unconditioned by whether an object exists at
+        //     that anchor, so its max stays ~0.9 even on a blank
+        //     scene — useless on its own.
+        //   obj_{8,16,32} — per-anchor *objectness* (is there a face
+        //     here at all). This is the signal that actually drops
+        //     when the user steps away.
+        //   bbox_*, kps_* — regression coords, ignored.
+        //
+        // The OpenCV reference inference multiplies cls × obj
+        // per-anchor and takes the max as the final face score.
+        // We approximate by taking the max within each kind across
+        // all strides, then multiplying.
+        let mut max_obj = 0f32;
+        let mut max_cls = 0f32;
+        for (name, val) in outputs.iter() {
+            let name_lower = name.to_ascii_lowercase();
+            let is_obj = name_lower.starts_with("obj_") || name_lower.contains("conf");
+            let is_cls = name_lower.starts_with("cls_") || name_lower.contains("score");
+            if !is_obj && !is_cls {
+                continue;
+            }
             if let Ok((_, slice)) = val.try_extract_tensor::<f32>() {
                 for &v in slice.iter() {
-                    if v.is_finite() && v > max_score {
-                        max_score = v;
+                    if !v.is_finite() || v < 0.0 || v > 1.0 {
+                        continue;
+                    }
+                    if is_obj && v > max_obj {
+                        max_obj = v;
+                    }
+                    if is_cls && v > max_cls {
+                        max_cls = v;
                     }
                 }
             }
         }
-        let presence = if max_score >= FACE_CONF_MIN {
+        // If only one was found (some YuNet exports merge them into
+        // a single "score" output), use that one.
+        let combined = match (max_obj > 0.0, max_cls > 0.0) {
+            (true, true) => max_obj * max_cls,
+            (true, false) => max_obj,
+            (false, true) => max_cls,
+            (false, false) => 0.0,
+        };
+        let presence = if combined >= FACE_CONF_MIN {
             Presence::Present
         } else {
             Presence::Absent
         };
-        Ok((presence, max_score.clamp(0.0, 1.0)))
+        Ok((presence, combined.clamp(0.0, 1.0)))
     }
 }
 
@@ -246,6 +281,17 @@ impl PresenceProbe {
             .map(|i| i.name().to_string())
             .unwrap_or_else(|| "input".to_string());
         let _ = inputs;
+        // Also log every output so we can pick the right tensor for
+        // confidence extraction (YuNet emits bbox/iou/cls/kps).
+        let outputs = session.outputs();
+        for out in outputs.iter() {
+            log::info!(
+                "PresenceProbe: YuNet output name='{}' dtype={:?}",
+                out.name(),
+                out.dtype()
+            );
+        }
+        let _ = outputs;
         // The 2023-mar export ships with declared input shape
         // [1, 3, 640, 640].
         Ok(Some(YunetEngine {
