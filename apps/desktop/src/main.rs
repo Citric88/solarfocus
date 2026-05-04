@@ -9,7 +9,7 @@
 //! - NEW: User settings persisted to JSON.
 
 use iced::widget::{button, column, container, text};
-use iced::{Color, Element, Length, Subscription, Task, window};
+use iced::{Element, Length, Subscription, Task, window};
 
 pub use solar_focus_core as SolarFocusCore;
 
@@ -27,9 +27,17 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "llm")]
 use infra::model_download::DownloadEvent;
 
+mod app;
 mod infra;
 mod ui;
 
+use app::helpers::{
+    digits_only, parse_minutes, recommended_model_choice, sanitize_for_display, weekday_short,
+    wipe_all_local_data,
+};
+use ui::components::{
+    badge_local, chip_local, destructive_button, ghost_button, settings_card_local, BadgeVariant,
+};
 use ui::sidebar::{Route, StatusPill};
 
 use chrono::{Datelike, Utc};
@@ -5346,270 +5354,6 @@ impl App {
     }
 }
 
-/// FIX-3 (rc14) — Reusable card wrapper for Setup tabs. Displays a
-/// muted label header above the body content, all on a SURFACE background
-/// with rounded corners. Replaces the legacy raw `row![]` settings rows.
-fn settings_card_local<'a>(label: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
-    use ui::palette::*;
-    container(
-        column![
-            text(label.to_string())
-                .size(FONT_SMALL)
-                .color(TEXT_MUTED),
-            body,
-        ]
-        .spacing(SPACE_SM as u16),
-    )
-    .padding(SPACE_MD as u16)
-    .style(|_| container::Style {
-        background: Some(iced::Background::Color(SURFACE)),
-        // rc16 — 1px ACCENT_DIM border separates the card from the
-        // canvas BG so chips inside don't bleed visually.
-        border: iced::Border {
-            radius: 8.0.into(),
-            width: 1.0,
-            color: ACCENT_DIM,
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
-/// FIX-3 (rc14) — Pill-style chip used for toggle buttons across Setup
-/// tabs. Selected state highlights in ACCENT; unselected uses
-/// SURFACE_RAISED **with a 1.5 px ACCENT_DIM border** so the silhouette
-/// is visible against the card's SURFACE background (rc16 — fix for
-/// "non-selected chips are almost invisible").
-fn chip_local<'a>(label: String, selected: bool, msg: Message) -> Element<'a, Message> {
-    use ui::palette::*;
-    iced::widget::button(
-        text(label)
-            .size(FONT_SMALL)
-            .color(if selected { BG } else { TEXT_PRIMARY }),
-    )
-    .on_press(msg)
-    .padding([6, 14])
-    .style(move |_, status| {
-        let hovered = matches!(status, iced::widget::button::Status::Hovered);
-        iced::widget::button::Style {
-            background: Some(iced::Background::Color(if selected {
-                ACCENT
-            } else if hovered {
-                // Slightly brighter fill on hover to confirm interactivity.
-                Color {
-                    r: SURFACE_RAISED.r + 0.04,
-                    g: SURFACE_RAISED.g + 0.04,
-                    b: SURFACE_RAISED.b + 0.04,
-                    a: 1.0,
-                }
-            } else {
-                SURFACE_RAISED
-            })),
-            text_color: if selected { BG } else { TEXT_PRIMARY },
-            border: iced::Border {
-                radius: 6.0.into(),
-                width: if selected { 0.0 } else { 1.5 },
-                color: if selected { ACCENT } else { ACCENT_DIM },
-            },
-            ..Default::default()
-        }
-    })
-    .into()
-}
-
-/// v1.5.0 — Pure visual label, not interactive. Replaces the half-dozen
-/// inline-styled "small bordered text container" patterns scattered
-/// across Stats / Coach / Setup. Pick a variant for the semantic color;
-/// the surface is always `SURFACE_RAISED` with a 1px border in the
-/// variant color.
-#[derive(Clone, Copy)]
-#[allow(dead_code)] // Some variants used only by future call sites.
-enum BadgeVariant {
-    Accent,
-    Muted,
-    Warning,
-    Danger,
-}
-
-fn badge_local<'a>(label: String, variant: BadgeVariant) -> Element<'a, Message> {
-    use ui::palette::*;
-    let color = match variant {
-        BadgeVariant::Accent => ACCENT,
-        BadgeVariant::Muted => TEXT_MUTED,
-        BadgeVariant::Warning => WARNING,
-        BadgeVariant::Danger => DANGER,
-    };
-    container(text(label).size(FONT_TINY).color(color))
-        .padding([2, 8])
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(SURFACE_RAISED)),
-            border: iced::Border {
-                radius: 4.0.into(),
-                width: 1.0,
-                color,
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-/// v1.5.0 — Destructive action button. DANGER border + DANGER text on
-/// transparent background; hover fills with low-alpha DANGER. Used in
-/// Privacy "Borrar todos los datos", Coach "Limpiar historial", Setup
-/// AI "Eliminar modelo" — anywhere a click is irreversible.
-fn destructive_button<'a>(label: String, msg: Message) -> Element<'a, Message> {
-    use ui::palette::*;
-    iced::widget::button(text(label).size(FONT_SMALL).color(DANGER))
-        .on_press(msg)
-        .padding([6, 14])
-        .style(move |_, status| {
-            let hovered = matches!(status, iced::widget::button::Status::Hovered);
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(if hovered {
-                    Color { r: DANGER.r, g: DANGER.g, b: DANGER.b, a: 0.12 }
-                } else {
-                    Color::TRANSPARENT
-                })),
-                text_color: DANGER,
-                border: iced::Border {
-                    radius: 6.0.into(),
-                    width: 1.5,
-                    color: DANGER,
-                },
-                ..Default::default()
-            }
-        })
-        .into()
-}
-
-#[allow(dead_code)] // No longer used after FIX-3 AI tab rewrite; kept for compatibility.
-fn on_off(b: bool) -> &'static str {
-    if b {
-        "ON"
-    } else {
-        "OFF"
-    }
-}
-
-// v1.3 Wave A1 — strip non-digits and cap length so the input stays a
-// well-behaved numeric field even if the user pastes garbage.
-fn digits_only(s: &str, max_len: usize) -> String {
-    s.chars().filter(|c| c.is_ascii_digit()).take(max_len).collect()
-}
-
-// Parse a digit string into a u32, returning None if outside [min, max].
-fn parse_minutes(s: &str, min: u32, max: u32) -> Option<u32> {
-    s.parse::<u32>().ok().filter(|m| (min..=max).contains(m))
-}
-
-#[cfg(test)]
-mod custom_duration_tests {
-    use super::{digits_only, parse_minutes};
-
-    #[test]
-    fn digits_only_strips_letters_and_symbols() {
-        assert_eq!(digits_only("a1b2c3!@#", 10), "123");
-        assert_eq!(digits_only("", 10), "");
-        assert_eq!(digits_only("abc", 10), "");
-    }
-
-    #[test]
-    fn digits_only_caps_length() {
-        assert_eq!(digits_only("12345", 3), "123");
-        assert_eq!(digits_only("9999", 4), "9999");
-    }
-
-    #[test]
-    fn parse_minutes_in_range() {
-        assert_eq!(parse_minutes("1", 1, 180), Some(1));
-        assert_eq!(parse_minutes("25", 1, 180), Some(25));
-        assert_eq!(parse_minutes("180", 1, 180), Some(180));
-    }
-
-    #[test]
-    fn parse_minutes_rejects_out_of_range() {
-        assert_eq!(parse_minutes("0", 1, 180), None);
-        assert_eq!(parse_minutes("181", 1, 180), None);
-        assert_eq!(parse_minutes("9999", 1, 180), None);
-    }
-
-    #[test]
-    fn parse_minutes_rejects_garbage() {
-        assert_eq!(parse_minutes("", 1, 180), None);
-        assert_eq!(parse_minutes("abc", 1, 180), None);
-        assert_eq!(parse_minutes("-5", 1, 180), None);
-    }
-}
-
-/// Remove the SQLite DB, settings.json, and any model files. Returns
-/// the count of paths actually deleted (best-effort; missing paths skipped).
-fn wipe_all_local_data() -> u32 {
-    let mut n = 0u32;
-    let mut try_remove = |p: std::path::PathBuf| {
-        if p.is_file() {
-            if std::fs::remove_file(&p).is_ok() {
-                n += 1;
-            }
-        } else if p.is_dir() {
-            if std::fs::remove_dir_all(&p).is_ok() {
-                n += 1;
-            }
-        }
-    };
-
-    if let Some(d) = directories::ProjectDirs::from("os", "SolarFocus", "SolarFocus") {
-        try_remove(d.config_dir().join("settings.json"));
-        try_remove(d.config_dir().join("rules.toml"));
-        try_remove(d.data_dir().join("solarfocus.db"));
-        try_remove(d.data_dir().join("models"));
-    }
-    n
-}
-
-/// BUG-A — Strip codepoints that cosmic-text's default font can't render
-/// (emojis, exotic symbols, BOMs). Keeps Latin-1 + accented Spanish
-/// characters intact. Also collapses any double whitespace from the
-/// removals.
-fn sanitize_for_display(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        let keep = match c as u32 {
-            // Basic Latin + Latin-1 Supplement (covers ¡¿áéíóúñü etc).
-            0x0009 | 0x000A => true,           // tab, newline
-            0x0020..=0x007E => true,           // printable ASCII
-            0x00A0..=0x00FF => true,           // Latin-1 supplement (¡¿ñ accents)
-            0x0100..=0x017F => true,           // Latin Extended-A
-            0x2010..=0x2027 => true,           // common punctuation (— – ‘ ’ “ ” …)
-            0x2030..=0x203F => true,           // ‰ ‹ › etc
-            _ => false,
-        };
-        if keep {
-            out.push(c);
-        } else if !out.ends_with(' ') {
-            out.push(' ');
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// ENH-6 — heuristic hardware recommendation.
-///   - Apple Silicon (target_arch=aarch64 + target_os=macos) → SmolLM2 (best quality on Metal).
-///   - Lower-spec systems (CPU cores < 8) → Llama-1B (lightest, fastest).
-///   - Otherwise → Qwen2.5-1.5B (balanced multilingual).
-fn recommended_model_choice() -> infra::settings::ModelChoice {
-    use infra::settings::ModelChoice;
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
-        ModelChoice::SmolLM2
-    } else if cores < 8 {
-        ModelChoice::Llama1B
-    } else {
-        ModelChoice::Qwen15
-    }
-}
-
 /// Synchronous one-off probe of the foreground-window API. Cheap (~ms);
 /// safe to call from update() since iced's update is on the main thread.
 fn probe_permission_now() -> PermissionStatus {
@@ -5620,47 +5364,6 @@ fn probe_permission_now() -> PermissionStatus {
         },
         None => PermissionStatus::Denied,
     }
-}
-
-fn weekday_short(d: chrono::Weekday) -> String {
-    use chrono::Weekday;
-    match d {
-        Weekday::Mon => "L".to_string(),
-        Weekday::Tue => "M".to_string(),
-        Weekday::Wed => "X".to_string(),
-        Weekday::Thu => "J".to_string(),
-        Weekday::Fri => "V".to_string(),
-        Weekday::Sat => "S".to_string(),
-        Weekday::Sun => "D".to_string(),
-    }
-}
-
-fn ghost_button(label: &str, msg: Message) -> Element<'_, Message> {
-    use ui::palette::*;
-    iced::widget::button(text(label.to_string()).size(FONT_SMALL).color(TEXT_SECONDARY))
-        .on_press(msg)
-        .padding([4, 10])
-        .style(|_, status| match status {
-            iced::widget::button::Status::Hovered => iced::widget::button::Style {
-                background: Some(iced::Background::Color(SURFACE_RAISED)),
-                text_color: TEXT_PRIMARY,
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            _ => iced::widget::button::Style {
-                background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
-                text_color: TEXT_SECONDARY,
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        })
-        .into()
 }
 
 /// Select the active Coach based on settings + compile-time `llm` feature.
@@ -5732,40 +5435,6 @@ fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
             Arc::new(RulesClassifier::bundled_with_user_override(&path))
         }
     }
-}
-
-#[allow(dead_code)]
-fn primary_button(label: &str, msg: Message) -> Element<'_, Message> {
-    button(text(label.to_string()).size(18))
-        .on_press(msg)
-        .padding([10, 24])
-        .style(|_, _| button::Style {
-            background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.6, 0.3))),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: 6.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-#[allow(dead_code)]
-fn secondary_button(label: &str, msg: Message) -> Element<'_, Message> {
-    button(text(label.to_string()).size(18))
-        .on_press(msg)
-        .padding([10, 24])
-        .style(|_, _| button::Style {
-            background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.50, 0.40))),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: 6.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 fn main() -> iced::Result {
