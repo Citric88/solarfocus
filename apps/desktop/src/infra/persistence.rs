@@ -233,6 +233,26 @@ impl SessionRepository {
         Ok(self.conn.last_insert_rowid() as u64)
     }
 
+    /// v1.4.0 — number of confirmed distractions whose timestamp
+    /// falls inside [start, start + duration_secs]. Used to compute a
+    /// per-session "attention score" displayed in the Stats canvas.
+    pub fn distractions_in_session_window(
+        &self,
+        start: &chrono::DateTime<chrono::Utc>,
+        duration_secs: f32,
+    ) -> SqlResult<u32> {
+        let end = *start + chrono::Duration::seconds(duration_secs as i64 + 2);
+        let count: u32 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM distraction_events WHERE at >= ? AND at <= ?",
+                rusqlite::params![start.to_rfc3339(), end.to_rfc3339()],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(count)
+    }
+
     /// v1.4.0 — top processes that confirmed as distractions over the
     /// last N days. Returns Vec<(process, count)> sorted by count desc.
     pub fn top_distractions_last_days(

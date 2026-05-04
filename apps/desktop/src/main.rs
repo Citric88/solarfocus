@@ -2211,6 +2211,25 @@ impl App {
                 .map(|s| {
                     let when = s.start_time.with_timezone(&chrono::Local).format("%H:%M").to_string();
                     let mins = (s.duration / 60.0).round() as u32;
+                    // v1.4.0 — per-session attention score. 100% baseline,
+                    // -20% per confirmed distraction inside the session
+                    // window, floored at 0%.
+                    let distract_count = self
+                        .session_repo
+                        .as_ref()
+                        .and_then(|r| {
+                            r.distractions_in_session_window(&s.start_time, s.duration)
+                                .ok()
+                        })
+                        .unwrap_or(0);
+                    let attention = 100u32.saturating_sub(distract_count.saturating_mul(20));
+                    let attention_color = if attention >= 80 {
+                        ACCENT
+                    } else if attention >= 50 {
+                        WARNING
+                    } else {
+                        DANGER
+                    };
                     container(
                         iced::widget::row![
                             text(when).size(FONT_SMALL).color(TEXT_SECONDARY),
@@ -2232,6 +2251,30 @@ impl App {
                                     radius: 4.0.into(),
                                     width: 1.0,
                                     color: ACCENT_DIM,
+                                },
+                                ..Default::default()
+                            }),
+                            iced::widget::Space::with_width(SPACE_SM as f32),
+                            // v1.4.0 — attention score badge.
+                            container(
+                                text(format!(
+                                    "{}{}",
+                                    match self.settings.language {
+                                        Language::Es => "Atención ",
+                                        Language::En => "Focus ",
+                                    },
+                                    format!("{}%", attention),
+                                ))
+                                .size(FONT_TINY)
+                                .color(attention_color),
+                            )
+                            .padding([2, 8])
+                            .style(move |_| container::Style {
+                                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                                border: iced::Border {
+                                    radius: 4.0.into(),
+                                    width: 1.0,
+                                    color: attention_color,
                                 },
                                 ..Default::default()
                             }),
