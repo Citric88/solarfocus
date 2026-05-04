@@ -515,6 +515,15 @@ impl App {
                 if Settings::load().calendar_live_enabled {
                     tasks.push(Task::done(Message::ToggleCalendarLive(true)));
                 }
+                // v1.4.0 rc11 — same boot-time auto-restore for camera
+                // presence. macOS Camera permission only prompts once;
+                // subsequent boots open the camera silently. Without
+                // this the user had to manually Desactivar+Activar
+                // every launch (caught in live test).
+                #[cfg(feature = "presence")]
+                if Settings::load().presence_enabled {
+                    tasks.push(Task::done(Message::TogglePresence(true)));
+                }
                 Task::batch(tasks)
             },
         )
@@ -992,12 +1001,57 @@ impl App {
                         self.focus_rules.record_distraction();
                         self.distractions_today =
                             self.distractions_today.saturating_add(1);
+                        // v1.4.0 — persist confirmed distraction so the
+                        // Stats canvas can show recent top offenders.
+                        // The "process" we record is the rule's keyword
+                        // (e.g. "deny:tiktok" → "tiktok") because rule
+                        // names already cluster equivalent surfaces
+                        // (e.g. tiktok web vs app vs URL match).
+                        if let Some(repo) = self.session_repo.as_ref() {
+                            let display_name: String = c
+                                .matched_rule
+                                .as_deref()
+                                .map(|r| {
+                                    r.splitn(2, ':')
+                                        .nth(1)
+                                        .unwrap_or(r)
+                                        .to_string()
+                                })
+                                .unwrap_or_else(|| "(sin nombre)".to_string());
+                            let _ = repo.save_distraction(
+                                &display_name,
+                                c.matched_rule.as_deref(),
+                                c.confidence,
+                            );
+                        }
                         log::warn!(
                             "Distraction confirmed (consecutive={}, today={}, rule={:?})",
                             self.consecutive_distraction_samples,
                             self.distractions_today,
                             c.matched_rule
                         );
+                        // v1.4.0 rc11 — fire a real macOS notification
+                        // via osascript so the alert reaches the user
+                        // even when they're on the distracting app.
+                        // Toast alone was missing the moment because
+                        // the user is by definition not looking at
+                        // SolarFocus when a window distraction fires.
+                        #[cfg(target_os = "macos")]
+                        {
+                            let rule = c.matched_rule.clone()
+                                .unwrap_or_else(|| "?".to_string());
+                            let body = match self.settings.language {
+                                Language::Es => format!("Distracción: {}. Vuelve al foco.", rule),
+                                Language::En => format!("Distraction: {}. Refocus.", rule),
+                            };
+                            let _ = std::process::Command::new("osascript")
+                                .arg("-e")
+                                .arg(format!(
+                                    r#"display notification "{}" with title "SolarFocus OS" sound name "Submarine""#,
+                                    body.replace('"', "\\\""),
+                                ))
+                                .spawn();
+                        }
                         let toast_text = match self.settings.language {
                             Language::Es => match &c.matched_rule {
                                 Some(r) => format!("Distracción detectada ({}). ¿Pausa o vuelves?", r),
@@ -1125,14 +1179,12 @@ impl App {
                 Task::none()
             }
             Message::SpawnEngineLoad => {
+                // v1.4.0 rc10 — no toast. LLM hot-swap completes in
+                // <200 ms on M-series, so the "Cargando coach IA…"
+                // toast (with its 20 s expiry) was nothing but visual
+                // noise on every boot. Slow loads will be re-flagged
+                // via a dedicated UI surface, not a transient bar.
                 log::info!("Spawning background LLM load…");
-                self.toast = Some(Toast {
-                    text: match self.settings.language {
-                        Language::Es => "Cargando coach IA…".to_string(),
-                        Language::En => "Loading AI coach…".to_string(),
-                    },
-                    expires_at: Instant::now() + Duration::from_secs(20),
-                });
                 self.spawn_engine_load()
             }
             Message::LlmEngineLoaded(result) => {
@@ -1149,13 +1201,8 @@ impl App {
                                 self.coach.is_ready(),
                                 self.summarizer.is_ready()
                             );
-                            self.toast = Some(Toast {
-                                text: match self.settings.language {
-                                    Language::Es => "Coach IA listo".to_string(),
-                                    Language::En => "AI coach ready".to_string(),
-                                },
-                                expires_at: Instant::now() + Duration::from_secs(4),
-                            });
+                            // v1.4.0 rc10 — no toast on completion;
+                            // user can verify Coach state in Setup.
                         }
                     }
                     Err(e) => {
@@ -1416,6 +1463,16 @@ impl App {
                                         "Presence (YuNet): auto-paused after {} Absent samples",
                                         self.consecutive_absent_samples
                                     );
+                                    // v1.4.0 rc5 — log camera-detected
+                                    // absence as a distraction so the
+                                    // attention score reflects it.
+                                    if let Some(repo) = self.session_repo.as_ref() {
+                                        let _ = repo.save_distraction(
+                                            "ausencia (cámara)",
+                                            Some("presence:absent"),
+                                            1.0,
+                                        );
+                                    }
                                     self.toast = Some(Toast {
                                         text: match self.settings.language {
                                             Language::Es =>
@@ -1617,6 +1674,15 @@ impl App {
                                         "Presence: auto-paused after {} Absent samples",
                                         self.consecutive_absent_samples
                                     );
+                                    // v1.4.0 rc5 — log brightness-detected
+                                    // absence as a distraction event too.
+                                    if let Some(repo) = self.session_repo.as_ref() {
+                                        let _ = repo.save_distraction(
+                                            "ausencia (luminancia)",
+                                            Some("presence:absent"),
+                                            sample.confidence.max(0.5),
+                                        );
+                                    }
                                     self.toast = Some(Toast {
                                         text: match self.settings.language {
                                             Language::Es =>
@@ -2186,15 +2252,79 @@ impl App {
             let rows: Vec<Element<'_, Message>> = today_sessions
                 .into_iter()
                 .map(|s| {
-                    let when = s.start_time.format("%H:%M").to_string();
+                    let when = s.start_time.with_timezone(&chrono::Local).format("%H:%M").to_string();
                     let mins = (s.duration / 60.0).round() as u32;
+                    // v1.4.0 — per-session attention score. 100% baseline,
+                    // -20% per confirmed distraction inside the session
+                    // window, floored at 0%.
+                    let distract_count = self
+                        .session_repo
+                        .as_ref()
+                        .and_then(|r| {
+                            r.distractions_in_session_window(&s.start_time, s.duration)
+                                .ok()
+                        })
+                        .unwrap_or(0);
+                    let attention = 100u32.saturating_sub(distract_count.saturating_mul(20));
+                    let attention_color = if attention >= 80 {
+                        ACCENT
+                    } else if attention >= 50 {
+                        WARNING
+                    } else {
+                        DANGER
+                    };
                     container(
                         iced::widget::row![
                             text(when).size(FONT_SMALL).color(TEXT_SECONDARY),
                             iced::widget::Space::with_width(SPACE_MD as f32),
-                            text(format!("{} min · {}", mins, s.state))
+                            text(format!("{} min", mins))
                                 .size(FONT_SMALL)
                                 .color(TEXT_PRIMARY),
+                            iced::widget::Space::with_width(SPACE_SM as f32),
+                            // v1.4.0 — category chip-style label.
+                            container(
+                                text(s.category.clone())
+                                    .size(FONT_TINY)
+                                    .color(ACCENT),
+                            )
+                            .padding([2, 8])
+                            .style(|_| container::Style {
+                                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                                border: iced::Border {
+                                    radius: 4.0.into(),
+                                    width: 1.0,
+                                    color: ACCENT_DIM,
+                                },
+                                ..Default::default()
+                            }),
+                            iced::widget::Space::with_width(SPACE_SM as f32),
+                            // v1.4.0 — attention score badge.
+                            container(
+                                text(format!(
+                                    "{}{}",
+                                    match self.settings.language {
+                                        Language::Es => "Atención ",
+                                        Language::En => "Focus ",
+                                    },
+                                    format!("{}%", attention),
+                                ))
+                                .size(FONT_TINY)
+                                .color(attention_color),
+                            )
+                            .padding([2, 8])
+                            .style(move |_| container::Style {
+                                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                                border: iced::Border {
+                                    radius: 4.0.into(),
+                                    width: 1.0,
+                                    color: attention_color,
+                                },
+                                ..Default::default()
+                            }),
+                            iced::widget::horizontal_space(),
+                            text(s.state.clone())
+                                .size(FONT_TINY)
+                                .color(TEXT_MUTED),
                         ]
                         .padding(SPACE_XS as u16),
                     )
@@ -2336,6 +2466,202 @@ impl App {
         .size(FONT_BODY)
         .color(TEXT_SECONDARY);
 
+        // v1.4.0 rc7 — disclaimer + open invitation to extend the
+        // deny list. After live-test feedback ("I was on Games and
+        // still got 100%"), the rules.toml deny list now covers the
+        // macOS Games app and major launchers, but custom titles
+        // still need a user override.
+        let attention_disclaimer = text(match self.settings.language {
+            Language::Es => "Atención = ventanas en la deny-list + ausencias detectadas por la cámara. La lista cubre redes sociales, streaming y juegos populares. Si una app o web te distrae y no la cuenta, edita rules.toml en ~/Library/Application Support/SolarFocus OS. Otros dispositivos (teléfono, tablet) no se detectan.",
+            Language::En => "Focus score = denylisted windows + camera-detected absences. The list covers social, streaming, and major games. If an app or site distracts you and isn't counted, edit rules.toml under ~/Library/Application Support/SolarFocus OS. Other devices (phone, tablet) aren't detected.",
+        })
+        .size(FONT_TINY)
+        .color(TEXT_MUTED);
+
+        // v1.4.0 rc1 — "Por categoría / By category" panel.
+        // Fed by the existing persistence::category_totals_last_days(7).
+        let category_totals = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.category_totals_last_days(7).ok())
+            .unwrap_or_default();
+        let category_card: Element<'_, Message> = {
+            let title = text(match self.settings.language {
+                Language::Es => "Por categoría · últimos 7 días",
+                Language::En => "By category · last 7 days",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED);
+            let inner: Element<'_, Message> = if category_totals.is_empty() {
+                text(match self.settings.language {
+                    Language::Es => "Aún no hay sesiones con categoría en los últimos 7 días.",
+                    Language::En => "No category-tagged sessions in the last 7 days.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED)
+                .into()
+            } else {
+                let total_secs: u32 = category_totals.iter().map(|(_, s, _)| *s).sum();
+                let max_secs: u32 = category_totals
+                    .iter()
+                    .map(|(_, s, _)| *s)
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                let rows: Vec<Element<'_, Message>> = category_totals
+                    .iter()
+                    .map(|(name, secs, count)| {
+                        let mins = secs / 60;
+                        let pct = if total_secs > 0 {
+                            (*secs as f32 / total_secs as f32 * 100.0).round() as u32
+                        } else { 0 };
+                        let bar_w = (*secs as f32 / max_secs as f32 * 280.0).max(2.0);
+                        let bar = iced::widget::container(
+                            iced::widget::Space::with_height(Length::Fixed(8.0)),
+                        )
+                        .width(Length::Fixed(bar_w))
+                        .height(Length::Fixed(8.0))
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(ACCENT)),
+                            border: iced::Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        });
+                        container(
+                            column![
+                                iced::widget::row![
+                                    text(name.clone())
+                                        .size(FONT_BODY)
+                                        .color(TEXT_PRIMARY),
+                                    iced::widget::horizontal_space(),
+                                    text(format!(
+                                        "{} min · {} {} · {}%",
+                                        mins,
+                                        count,
+                                        match self.settings.language {
+                                            Language::Es => if *count == 1 { "sesión" } else { "sesiones" },
+                                            Language::En => if *count == 1 { "session" } else { "sessions" },
+                                        },
+                                        pct,
+                                    ))
+                                    .size(FONT_TINY)
+                                    .color(TEXT_SECONDARY),
+                                ],
+                                bar,
+                            ]
+                            .spacing(SPACE_XS as u16),
+                        )
+                        .padding([SPACE_XS as u16, 0])
+                        .into()
+                    })
+                    .collect();
+                column(rows).spacing(SPACE_SM as u16).into()
+            };
+            container(column![title, inner].spacing(SPACE_SM as u16))
+                .padding(SPACE_MD as u16)
+                .width(Length::Fixed(560.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: ACCENT_DIM,
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
+
+        // v1.4.0 rc2 — top distractions (last 7 days).
+        let top_distractions = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.top_distractions_last_days(7, 6).ok())
+            .unwrap_or_default();
+        let distractions_card: Element<'_, Message> = {
+            let title = text(match self.settings.language {
+                Language::Es => "Distracciones más frecuentes · últimos 7 días",
+                Language::En => "Top distractions · last 7 days",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED);
+            let inner: Element<'_, Message> = if top_distractions.is_empty() {
+                text(match self.settings.language {
+                    Language::Es => "Sin distracciones registradas en los últimos 7 días. Buen trabajo.",
+                    Language::En => "No distractions logged in the last 7 days. Nice.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED)
+                .into()
+            } else {
+                let max_count = top_distractions
+                    .iter()
+                    .map(|(_, c)| *c)
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                let rows: Vec<Element<'_, Message>> = top_distractions
+                    .iter()
+                    .map(|(name, count)| {
+                        let bar_w = (*count as f32 / max_count as f32 * 280.0).max(2.0);
+                        let bar = iced::widget::container(
+                            iced::widget::Space::with_height(Length::Fixed(8.0)),
+                        )
+                        .width(Length::Fixed(bar_w))
+                        .height(Length::Fixed(8.0))
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(DANGER)),
+                            border: iced::Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        });
+                        container(
+                            column![
+                                iced::widget::row![
+                                    text(name.clone())
+                                        .size(FONT_BODY)
+                                        .color(TEXT_PRIMARY),
+                                    iced::widget::horizontal_space(),
+                                    text(format!(
+                                        "{} {}",
+                                        count,
+                                        match self.settings.language {
+                                            Language::Es => if *count == 1 { "vez" } else { "veces" },
+                                            Language::En => if *count == 1 { "hit" } else { "hits" },
+                                        },
+                                    ))
+                                    .size(FONT_TINY)
+                                    .color(TEXT_SECONDARY),
+                                ],
+                                bar,
+                            ]
+                            .spacing(SPACE_XS as u16),
+                        )
+                        .padding([SPACE_XS as u16, 0])
+                        .into()
+                    })
+                    .collect();
+                column(rows).spacing(SPACE_SM as u16).into()
+            };
+            container(column![title, inner].spacing(SPACE_SM as u16))
+                .padding(SPACE_MD as u16)
+                .width(Length::Fixed(560.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: ACCENT_DIM,
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
+
         let body = column![
             text(match self.settings.language {
                 Language::Es => "Estadísticas",
@@ -2346,15 +2672,22 @@ impl App {
             perm_card,
             cards,
             chart_card,
+            category_card,
+            distractions_card,
             recap_card,
             sessions_title,
+            attention_disclaimer,
             sessions_list,
         ]
         .spacing(SPACE_LG as u16)
         .padding(SPACE_XL as u16)
         .max_width(680);
 
-        container(body)
+        // v1.4.0 rc3 — wrap Stats body in scrollable so the new
+        // category + distractions panels (below the fold on standard
+        // window heights) are reachable. Same Length::Shrink contract
+        // we used for Setup in v1.3.0-rc5.
+        container(iced::widget::scrollable(body))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -2877,18 +3210,37 @@ impl App {
         // Single context-aware CTA below the ring.
         let cta = self.cta_button(is_paused);
 
-        // Microcopy or toast (toast wins).
-        let microcopy: Element<'_, Message> = if let Some(t) = &self.toast {
+        // Microcopy or toast (toast wins). v1.4.0 rc8 — guard against
+        // an empty / whitespace-only toast text that would render as a
+        // bare yellow bar (saw this on boot when the LLM hot-swap fired
+        // before the loading toast had a chance to paint).
+        let toast_visible = self
+            .toast
+            .as_ref()
+            .map(|t| !t.text.trim().is_empty())
+            .unwrap_or(false);
+        let microcopy: Element<'_, Message> = if toast_visible {
+            // v1.4.0 rc9 — readable toast: bigger text, explicit
+            // near-black color (not BG which had a green tint that
+            // some screens rendered as low-contrast on the yellow
+            // WARNING background), bolded close × that's actually
+            // visible.
+            let t = self.toast.as_ref().unwrap();
+            let toast_text_color = iced::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 };
             container(
                 iced::widget::row![
-                    text(t.text.clone()).size(FONT_BODY).color(BG),
+                    text(t.text.clone())
+                        .size(FONT_LEAD)
+                        .color(toast_text_color),
                     iced::widget::horizontal_space(),
-                    button(text("×").size(FONT_SMALL))
+                    button(text("×").size(FONT_LEAD).color(toast_text_color))
                         .on_press(Message::DismissToast)
-                        .padding([2, 8])
+                        .padding([2, 10])
                         .style(|_, _| button::Style {
-                            background: Some(iced::Background::Color(WARNING)),
-                            text_color: BG,
+                            background: Some(iced::Background::Color(iced::Color {
+                                r: 0.05, g: 0.05, b: 0.05, a: 0.10,
+                            })),
+                            text_color: iced::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 },
                             border: iced::Border {
                                 radius: 3.0.into(),
                                 ..Default::default()
@@ -2896,7 +3248,8 @@ impl App {
                             ..Default::default()
                         }),
                 ]
-                .padding(SPACE_SM as u16),
+                .padding(SPACE_SM as u16)
+                .align_y(iced::alignment::Vertical::Center),
             )
             .padding(SPACE_SM as u16)
             .style(|_| container::Style {
