@@ -1439,6 +1439,16 @@ impl App {
                                         "Presence (YuNet): auto-paused after {} Absent samples",
                                         self.consecutive_absent_samples
                                     );
+                                    // v1.4.0 rc5 — log camera-detected
+                                    // absence as a distraction so the
+                                    // attention score reflects it.
+                                    if let Some(repo) = self.session_repo.as_ref() {
+                                        let _ = repo.save_distraction(
+                                            "ausencia (cámara)",
+                                            Some("presence:absent"),
+                                            1.0,
+                                        );
+                                    }
                                     self.toast = Some(Toast {
                                         text: match self.settings.language {
                                             Language::Es =>
@@ -1640,6 +1650,15 @@ impl App {
                                         "Presence: auto-paused after {} Absent samples",
                                         self.consecutive_absent_samples
                                     );
+                                    // v1.4.0 rc5 — log brightness-detected
+                                    // absence as a distraction event too.
+                                    if let Some(repo) = self.session_repo.as_ref() {
+                                        let _ = repo.save_distraction(
+                                            "ausencia (luminancia)",
+                                            Some("presence:absent"),
+                                            sample.confidence.max(0.5),
+                                        );
+                                    }
                                     self.toast = Some(Toast {
                                         text: match self.settings.language {
                                             Language::Es =>
