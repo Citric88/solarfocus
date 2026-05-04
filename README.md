@@ -5,7 +5,7 @@
 **Pomodoro de escritorio con coach de IA que vive en tu equipo.**
 Privacidad por diseño — sin nube, sin telemetría, sin cuenta.
 
-[![estado](https://img.shields.io/badge/estado-v1.3.0--rc4-brightgreen)]()
+[![estado](https://img.shields.io/badge/estado-v1.3.1--dev-brightgreen)]()
 [![rust](https://img.shields.io/badge/rust-1.78%2B-orange)]()
 [![iced](https://img.shields.io/badge/iced-0.13-blueviolet)]()
 [![plataforma](https://img.shields.io/badge/macOS-Apple%20Silicon-black)]()

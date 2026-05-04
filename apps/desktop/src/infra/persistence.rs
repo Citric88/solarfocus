@@ -162,7 +162,7 @@ impl SessionRepository {
     }
 
     /// Resuelve la ruta del DB según OS (#21)
-    /// macOS: ~/Library/Application Support/SolarFocus/solarfocus.db
+    /// macOS: ~/Library/Application Support/SolarFocus OS/solarfocus.db
     /// Linux: ~/.local/share/solarfocus/solarfocus.db
     /// Windows: %APPDATA%\SolarFocus\solarfocus.db
     fn default_db_path() -> PathBuf {

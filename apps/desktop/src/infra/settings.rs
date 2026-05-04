@@ -1,8 +1,8 @@
 //! User-tunable settings persisted as JSON in the OS config dir.
 //!
-//! macOS:   ~/Library/Application Support/SolarFocus/settings.json
-//! Linux:   ~/.config/solarfocus/settings.json
-//! Windows: %APPDATA%\SolarFocus\settings.json
+//! macOS:   ~/Library/Application Support/SolarFocus OS/settings.json
+//! Linux:   ~/.config/solarfocus-os/settings.json
+//! Windows: %APPDATA%\SolarFocus OS\settings.json
 //!
 //! Schema is additive — new fields use `#[serde(default)]` so old files keep working.
 

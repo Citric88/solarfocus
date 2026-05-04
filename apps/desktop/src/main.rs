@@ -340,7 +340,7 @@ impl App {
         let classifier = build_classifier(&settings);
 
         log::info!(
-            "v1.2.0-rc3 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
+            "v1.3.1 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
             settings.ai_enabled,
             settings.language,
             settings.window_poll_secs,
@@ -2104,8 +2104,8 @@ impl App {
         let lang = self.settings.language;
 
         let title = text(match lang {
-            Language::Es => "¿Qué es SolarFocus?",
-            Language::En => "What is SolarFocus?",
+            Language::Es => "¿Qué es SolarFocus OS?",
+            Language::En => "What is SolarFocus OS?",
         })
         .size(FONT_TITLE)
         .color(TEXT_PRIMARY);
@@ -2281,10 +2281,10 @@ impl App {
                 pick("Cómo funciona: cada sesión completada se guarda en SQLite local con timestamp y duración. \
                       La pestaña Stats agrega contadores de hoy, esta semana y total histórico, más una gráfica \
                       de minutos por día para los últimos 7 días. La base de datos vive en \
-                      ~/Library/Application Support/SolarFocus.",
+                      ~/Library/Application Support/SolarFocus OS.",
                      "How it works: each completed session is saved to local SQLite with timestamp and duration. \
                       The Stats tab aggregates today, week, and lifetime counters plus a 7-day minutes-per-day chart. \
-                      The database lives in ~/Library/Application Support/SolarFocus.")),
+                      The database lives in ~/Library/Application Support/SolarFocus OS.")),
         ]
         .spacing(SPACE_SM as u16);
 
@@ -3764,7 +3764,7 @@ impl App {
         use ui::palette::*;
         column![
             text("SolarFocus OS").size(FONT_TITLE).color(TEXT_PRIMARY),
-            text("v1.2.0-rc2").size(FONT_BODY).color(TEXT_SECONDARY),
+            text("v1.3.1").size(FONT_BODY).color(TEXT_SECONDARY),
             text(match self.settings.language {
                 Language::Es =>
                     "Productividad enfocada con IA local. Privacidad por diseño.",
