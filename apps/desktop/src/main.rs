@@ -2442,6 +2442,16 @@ impl App {
         .size(FONT_BODY)
         .color(TEXT_SECONDARY);
 
+        // v1.4.0 rc6 — honest disclaimer about what "Atención" actually
+        // measures. Surfaced after the user-test "I was on my phone the
+        // whole time but got Atención 100%" — we can't see other devices.
+        let attention_disclaimer = text(match self.settings.language {
+            Language::Es => "Atención = ventanas distractoras (deny-list) + ausencias detectadas por la cámara. No puede ver tu teléfono u otros dispositivos. Si tu cara está frente a la pantalla mientras revisas el móvil, la sesión seguirá apareciendo como enfocada.",
+            Language::En => "Focus score = denylisted windows + camera-detected absences. It can't see your phone or other devices. If your face stays in view while you scroll your phone, the session still counts as focused.",
+        })
+        .size(FONT_TINY)
+        .color(TEXT_MUTED);
+
         // v1.4.0 rc1 — "Por categoría / By category" panel.
         // Fed by the existing persistence::category_totals_last_days(7).
         let category_totals = self
@@ -2640,6 +2650,7 @@ impl App {
             distractions_card,
             recap_card,
             sessions_title,
+            attention_disclaimer,
             sessions_list,
         ]
         .spacing(SPACE_LG as u16)
