@@ -1148,14 +1148,12 @@ impl App {
                 Task::none()
             }
             Message::SpawnEngineLoad => {
+                // v1.4.0 rc10 — no toast. LLM hot-swap completes in
+                // <200 ms on M-series, so the "Cargando coach IA…"
+                // toast (with its 20 s expiry) was nothing but visual
+                // noise on every boot. Slow loads will be re-flagged
+                // via a dedicated UI surface, not a transient bar.
                 log::info!("Spawning background LLM load…");
-                self.toast = Some(Toast {
-                    text: match self.settings.language {
-                        Language::Es => "Cargando coach IA…".to_string(),
-                        Language::En => "Loading AI coach…".to_string(),
-                    },
-                    expires_at: Instant::now() + Duration::from_secs(20),
-                });
                 self.spawn_engine_load()
             }
             Message::LlmEngineLoaded(result) => {
@@ -1172,13 +1170,8 @@ impl App {
                                 self.coach.is_ready(),
                                 self.summarizer.is_ready()
                             );
-                            self.toast = Some(Toast {
-                                text: match self.settings.language {
-                                    Language::Es => "Coach IA listo".to_string(),
-                                    Language::En => "AI coach ready".to_string(),
-                                },
-                                expires_at: Instant::now() + Duration::from_secs(4),
-                            });
+                            // v1.4.0 rc10 — no toast on completion;
+                            // user can verify Coach state in Setup.
                         }
                     }
                     Err(e) => {
