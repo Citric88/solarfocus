@@ -2239,17 +2239,28 @@ impl App {
                 "Checking permission…",
             ),
         };
-        // v1.4.1 — when permission is not Granted, surface the same
-        // "Open System Settings" + "Re-verify" actions that already
-        // exist in the Privacy tab so the user can fix it in one
-        // click without hunting for it. macOS does persist the grant
-        // (no need to re-grant every launch); the most common cause
-        // of seeing "Sin permiso" after a previous Allow is having
-        // not restarted the app after granting in System Settings.
-        let perm_actions: Element<'_, Message> =
+        // v1.5.0 — refactored permission card. Was a single horizontal
+        // row that crammed status badge + status text + 2 action chips,
+        // which read tight at narrow widths. Now stacks: header row
+        // (status badge + text) on top, optional actions row below.
+        // Container also adopts the canonical 1 px ACCENT_DIM border
+        // for consistency with every other surface card.
+        let perm_header_row: Element<'_, Message> = iced::widget::row![
+            text("●").size(FONT_LEAD).color(perm_color),
+            iced::widget::Space::with_width(SPACE_SM as f32),
+            text(if self.settings.language == Language::Es {
+                perm_text_es
+            } else {
+                perm_text_en
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_PRIMARY),
+        ]
+        .align_y(iced::alignment::Vertical::Center)
+        .into();
+        let perm_actions_row: Element<'_, Message> =
             if !matches!(self.permission_status, PermissionStatus::Granted) {
                 iced::widget::row![
-                    iced::widget::Space::with_width(SPACE_SM as f32),
                     chip_local(
                         match self.settings.language {
                             Language::Es => "Abrir Ajustes del sistema".to_string(),
@@ -2270,31 +2281,18 @@ impl App {
                 ]
                 .into()
             } else {
-                iced::widget::Space::with_width(Length::Fixed(0.0)).into()
+                iced::widget::Space::with_height(Length::Fixed(0.0)).into()
             };
         let perm_card: Element<'_, Message> = container(
-            iced::widget::row![
-                text("●").size(FONT_LEAD).color(perm_color),
-                iced::widget::Space::with_width(SPACE_SM as f32),
-                text(if self.settings.language == Language::Es {
-                    perm_text_es
-                } else {
-                    perm_text_en
-                })
-                .size(FONT_SMALL)
-                .color(TEXT_PRIMARY),
-                iced::widget::horizontal_space(),
-                perm_actions,
-            ]
-            .padding(SPACE_SM as u16)
-            .align_y(iced::alignment::Vertical::Center),
+            column![perm_header_row, perm_actions_row].spacing(SPACE_SM as u16),
         )
-        .padding(SPACE_XS as u16)
+        .padding(SPACE_MD as u16)
         .style(|_| container::Style {
             background: Some(iced::Background::Color(SURFACE)),
             border: iced::Border {
-                radius: 6.0.into(),
-                ..Default::default()
+                radius: 8.0.into(),
+                width: 1.0,
+                color: ACCENT_DIM,
             },
             ..Default::default()
         })
@@ -2308,6 +2306,9 @@ impl App {
             .and_then(|r| r.sessions_for_date(&today_iso).ok())
             .unwrap_or_default();
         let sessions_list: Element<'_, Message> = if today_sessions.is_empty() {
+            // v1.5.0 — empty state now matches the populated frame
+            // (same width + ACCENT_DIM border) so the layout doesn't
+            // shift when the first session lands.
             container(
                 text(match self.settings.language {
                     Language::Es => "Aún no has completado sesiones hoy.",
@@ -2317,11 +2318,13 @@ impl App {
                 .color(TEXT_MUTED),
             )
             .padding(SPACE_MD as u16)
+            .width(Length::Fixed(560.0))
             .style(|_| container::Style {
                 background: Some(iced::Background::Color(SURFACE)),
                 border: iced::Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: ACCENT_DIM,
                 },
                 ..Default::default()
             })
@@ -2387,9 +2390,12 @@ impl App {
                 .width(Length::Fixed(560.0))
                 .style(|_| container::Style {
                     background: Some(iced::Background::Color(SURFACE)),
+                    // v1.5.0 — match the empty-state border so the
+                    // frame doesn't change shape when sessions arrive.
                     border: iced::Border {
-                        radius: 6.0.into(),
-                        ..Default::default()
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: ACCENT_DIM,
                     },
                     ..Default::default()
                 })
