@@ -8,3 +8,4 @@ pub mod components;
 pub mod palette;
 pub mod ring;
 pub mod sidebar;
+pub mod views;
