@@ -47,6 +47,11 @@ pub struct FocusContext {
     /// Last process name flagged as distraction, if any (e.g. "TikTok").
     #[serde(default)]
     pub last_distraction: Option<String>,
+    /// v1.3 Wave A3 — current session category if the user picked one
+    /// (e.g. "Coding", "Writing", "Reading", "Deep work"). `None` falls
+    /// back to the generic curated bank.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 impl FocusContext {
@@ -63,6 +68,7 @@ impl FocusContext {
             distractions_today: 0,
             focus_minutes_7d: 0,
             last_distraction: None,
+            category: None,
         }
     }
 }

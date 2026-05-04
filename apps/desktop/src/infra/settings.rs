@@ -114,6 +114,38 @@ pub struct Settings {
     pub break_minutes: u32,
     #[serde(default = "default_long_break_minutes")]
     pub long_break_minutes: u32,
+
+    // v1.3 Wave A2 — last selected focus category. Persisted so the chip
+    // selection survives restarts. Default "Focus" matches the legacy
+    // value used by v1.2 rows after migration.
+    #[serde(default = "default_category")]
+    pub last_category: String,
+
+    // v1.3 Wave B — camera-based presence detection. Off by default
+    // because it needs Camera permission and we want explicit opt-in.
+    #[serde(default)]
+    pub presence_enabled: bool,
+    /// Consecutive Absent samples (1 sample/sec) before auto-pausing
+    /// the focus session. 3 = ≈3 seconds.
+    #[serde(default = "default_absent_threshold")]
+    pub presence_absent_threshold: u8,
+
+    // v1.3 Wave C — manual "next deadline" stored as RFC3339 local
+    // datetime + a label. v1.3.1 will replace this with a live
+    // EventKit feed; the field stays as a fallback when permission
+    // is denied or no calendar accounts are configured.
+    #[serde(default)]
+    pub next_deadline_at: Option<String>,
+    #[serde(default)]
+    pub next_deadline_label: String,
+}
+
+fn default_absent_threshold() -> u8 {
+    3
+}
+
+fn default_category() -> String {
+    "Focus".to_string()
 }
 
 fn default_focus_minutes() -> u32 {
@@ -166,6 +198,11 @@ impl Default for Settings {
             focus_minutes: 25,
             break_minutes: 5,
             long_break_minutes: 15,
+            last_category: default_category(),
+            presence_enabled: false,
+            presence_absent_threshold: default_absent_threshold(),
+            next_deadline_at: None,
+            next_deadline_label: String::new(),
         }
     }
 }

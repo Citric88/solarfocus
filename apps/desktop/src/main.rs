@@ -69,6 +69,27 @@ pub enum Message {
     SetFocusMinutes(u32),
     SetBreakMinutes(u32),
     SetLongBreakMinutes(u32),
+    // v1.3 Wave A1 — free-form custom duration text inputs.
+    SetFocusMinutesText(String),
+    SetBreakMinutesText(String),
+    SetLongBreakMinutesText(String),
+    // v1.3 Wave A2 — named focus category for the next session.
+    SetCategory(String),
+    SetCategoryText(String),
+    // v1.3 Wave B — camera-based presence detection (feature-gated).
+    #[cfg(feature = "presence")]
+    TogglePresence(bool),
+    #[cfg(feature = "presence")]
+    PresenceProbe,
+    #[cfg(feature = "presence")]
+    PresenceReady(Result<infra::presence::PresenceSample, String>),
+    // v1.3 Wave C — manual next-deadline input (label + HH:MM today).
+    #[cfg(feature = "calendar")]
+    SetDeadlineLabel(String),
+    #[cfg(feature = "calendar")]
+    SetDeadlineTime(String),
+    #[cfg(feature = "calendar")]
+    ClearDeadline,
     ThumbsUp,
     ThumbsDown,
 
@@ -184,6 +205,33 @@ pub struct App {
     // FIX-3 (rc14) — show advanced (debug) controls in AI tab.
     // Ephemeral; not persisted.
     setup_show_advanced: bool,
+
+    // v1.3 Wave A1 — ephemeral text-input buffers for free-form custom
+    // durations. Initialized from settings on App::new(). When the user
+    // types a valid u32 in 1..=180, both the buffer and the persisted
+    // setting are updated.
+    custom_focus_str: String,
+    custom_break_str: String,
+    custom_long_break_str: String,
+    // v1.3 Wave A2 — ephemeral text buffer for free-form category label.
+    // Mirrors settings.last_category and is only re-applied to settings
+    // when non-empty after trim.
+    custom_category_str: String,
+    // v1.3 Wave C — ephemeral input buffer for HH:MM today.
+    #[cfg(feature = "calendar")]
+    deadline_time_str: String,
+
+    // v1.3 Wave B — camera presence probe (lazy init on first toggle).
+    // Wrapped in Arc<Mutex<>> because PresenceProbe is Send+Sync but
+    // mutable internally; spawn_blocking captures it.
+    #[cfg(feature = "presence")]
+    presence_probe: Option<std::sync::Arc<infra::presence::PresenceProbe>>,
+    #[cfg(feature = "presence")]
+    consecutive_absent_samples: u8,
+    #[cfg(feature = "presence")]
+    last_presence: Option<infra::presence::Presence>,
+    #[cfg(feature = "presence")]
+    presence_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +393,21 @@ impl App {
             .as_ref()
             .and_then(|r| r.feedback_counts().ok())
             .unwrap_or((0, 0));
+        // v1.3 Wave A1 — capture initial duration strings before `settings`
+        // is moved into Self.
+        let custom_focus_str = settings.focus_minutes.to_string();
+        let custom_break_str = settings.break_minutes.to_string();
+        let custom_long_break_str = settings.long_break_minutes.to_string();
+        let custom_category_str = settings.last_category.clone();
+        // v1.3 Wave C — initial deadline string (only used when `calendar`
+        // feature is on; computed unconditionally to keep code simple).
+        #[cfg(feature = "calendar")]
+        let initial_deadline_str: String = settings
+            .next_deadline_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+            .unwrap_or_default();
 
         (
             Self {
@@ -378,6 +441,20 @@ impl App {
                 setup_tab: SetupTab::default(),
                 wizard_step: WizardStep::Welcome,
                 setup_show_advanced: false,
+                custom_focus_str,
+                custom_break_str,
+                custom_long_break_str,
+                custom_category_str,
+                #[cfg(feature = "calendar")]
+                deadline_time_str: initial_deadline_str,
+                #[cfg(feature = "presence")]
+                presence_probe: None,
+                #[cfg(feature = "presence")]
+                consecutive_absent_samples: 0,
+                #[cfg(feature = "presence")]
+                last_presence: None,
+                #[cfg(feature = "presence")]
+                presence_error: None,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).
@@ -617,6 +694,9 @@ impl App {
             distractions_today: self.distractions_today,
             focus_minutes_7d,
             last_distraction,
+            // v1.3 Wave A3 — pass the user's chosen category through
+            // so the curated bank can pick a category-flavored line.
+            category: Some(self.settings.last_category.clone()),
         }
     }
 
@@ -644,6 +724,20 @@ impl App {
             let secs = self.settings.window_poll_secs.max(1) as u64;
             subs.push(
                 iced::time::every(Duration::from_secs(secs)).map(|_| Message::WindowProbe),
+            );
+        }
+
+        // v1.3 Wave B — presence probe ticks once per second while a focus
+        // session is active and the user has opted in.
+        #[cfg(feature = "presence")]
+        if self.settings.presence_enabled
+            && matches!(
+                self.pomodoro_engine.state(),
+                SolarFocusCore::AppState::Focusing(_)
+            )
+        {
+            subs.push(
+                iced::time::every(Duration::from_secs(1)).map(|_| Message::PresenceProbe),
             );
         }
 
@@ -779,6 +873,7 @@ impl App {
                         start_time: Utc::now(),
                         duration,
                         state: "completed".to_string(),
+                        category: self.settings.last_category.clone(),
                     };
                     match repo.save_session(&record) {
                         Ok(id) => log::info!("Sesión #{} guardada", id),
@@ -1056,8 +1151,9 @@ impl App {
                 Task::none()
             }
             Message::SetFocusMinutes(mins) => {
-                let mins = mins.clamp(1, 120);
+                let mins = mins.clamp(1, 180);
                 self.settings.focus_minutes = mins;
+                self.custom_focus_str = mins.to_string();
                 self.settings.save();
                 self.pomodoro_engine.config_mut().focus_duration = (mins as f32) * 60.0;
                 log::info!("Focus duration → {} min", mins);
@@ -1071,8 +1167,9 @@ impl App {
                 Task::none()
             }
             Message::SetBreakMinutes(mins) => {
-                let mins = mins.clamp(1, 60);
+                let mins = mins.clamp(1, 180);
                 self.settings.break_minutes = mins;
+                self.custom_break_str = mins.to_string();
                 self.settings.save();
                 self.pomodoro_engine.config_mut().short_break_duration = (mins as f32) * 60.0;
                 log::info!("Short break → {} min", mins);
@@ -1086,11 +1183,191 @@ impl App {
                 Task::none()
             }
             Message::SetLongBreakMinutes(mins) => {
-                let mins = mins.clamp(1, 120);
+                let mins = mins.clamp(1, 180);
                 self.settings.long_break_minutes = mins;
+                self.custom_long_break_str = mins.to_string();
                 self.settings.save();
                 self.pomodoro_engine.config_mut().long_break_duration = (mins as f32) * 60.0;
                 log::info!("Long break → {} min", mins);
+                Task::none()
+            }
+            // v1.3 Wave A1 — accept any keystroke into the buffer; if it
+            // parses to a u32 in 1..=180, apply immediately. Empty / out
+            // of range / non-numeric stays in the buffer but does not
+            // mutate the persisted setting.
+            Message::SetFocusMinutesText(s) => {
+                self.custom_focus_str = digits_only(&s, 3);
+                if let Some(m) = parse_minutes(&self.custom_focus_str, 1, 180) {
+                    self.settings.focus_minutes = m;
+                    self.settings.save();
+                    self.pomodoro_engine.config_mut().focus_duration = (m as f32) * 60.0;
+                }
+                Task::none()
+            }
+            Message::SetBreakMinutesText(s) => {
+                self.custom_break_str = digits_only(&s, 3);
+                if let Some(m) = parse_minutes(&self.custom_break_str, 1, 180) {
+                    self.settings.break_minutes = m;
+                    self.settings.save();
+                    self.pomodoro_engine.config_mut().short_break_duration = (m as f32) * 60.0;
+                }
+                Task::none()
+            }
+            Message::SetLongBreakMinutesText(s) => {
+                self.custom_long_break_str = digits_only(&s, 3);
+                if let Some(m) = parse_minutes(&self.custom_long_break_str, 1, 180) {
+                    self.settings.long_break_minutes = m;
+                    self.settings.save();
+                    self.pomodoro_engine.config_mut().long_break_duration = (m as f32) * 60.0;
+                }
+                Task::none()
+            }
+            // v1.3 Wave A2 — set the category for the next focus session.
+            // Persisted so chip selection survives restarts.
+            Message::SetCategory(c) => {
+                self.settings.last_category = c.clone();
+                self.custom_category_str = c.clone();
+                self.settings.save();
+                log::info!("Category → {}", c);
+                Task::none()
+            }
+            Message::SetCategoryText(s) => {
+                // Cap to a sane length to keep DB rows bounded.
+                let trimmed: String = s.chars().take(40).collect();
+                self.custom_category_str = trimmed.clone();
+                if !trimmed.trim().is_empty() {
+                    self.settings.last_category = trimmed.trim().to_string();
+                    self.settings.save();
+                }
+                Task::none()
+            }
+            // v1.3 Wave B — toggle the presence probe. First enable opens
+            // the camera (triggers macOS Camera permission prompt). On
+            // failure we save the error string for the UI to surface.
+            #[cfg(feature = "presence")]
+            Message::TogglePresence(on) => {
+                self.settings.presence_enabled = on;
+                self.settings.save();
+                self.presence_error = None;
+                if on {
+                    if self.presence_probe.is_none() {
+                        match infra::presence::PresenceProbe::new() {
+                            Ok(p) => {
+                                self.presence_probe = Some(std::sync::Arc::new(p));
+                                log::info!("Presence: probe initialized");
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                log::warn!("Presence: init failed: {}", msg);
+                                self.presence_error = Some(msg);
+                                self.settings.presence_enabled = false;
+                                self.settings.save();
+                            }
+                        }
+                    }
+                } else {
+                    self.presence_probe = None;
+                    self.last_presence = None;
+                    self.consecutive_absent_samples = 0;
+                }
+                Task::none()
+            }
+            #[cfg(feature = "presence")]
+            Message::PresenceProbe => {
+                // Poll synchronously — capture + brightness mean takes
+                // <30 ms on M-series, fast enough for the UI thread at
+                // 1 Hz. Avoids Send bounds on macOS Camera handles.
+                if let Some(probe) = self.presence_probe.as_ref() {
+                    let result = probe.poll().map_err(|e| e.to_string());
+                    Task::done(Message::PresenceReady(result))
+                } else {
+                    Task::none()
+                }
+            }
+            // v1.3 Wave C — manual next-deadline input handlers.
+            #[cfg(feature = "calendar")]
+            Message::SetDeadlineLabel(s) => {
+                let trimmed: String = s.chars().take(60).collect();
+                self.settings.next_deadline_label = trimmed;
+                self.settings.save();
+                Task::none()
+            }
+            #[cfg(feature = "calendar")]
+            Message::SetDeadlineTime(s) => {
+                use chrono::{NaiveTime, TimeZone, Local};
+                // Accept "HH:MM" only. Anything else just buffers without
+                // applying.
+                let cleaned: String = s
+                    .chars()
+                    .filter(|c| c.is_ascii_digit() || *c == ':')
+                    .take(5)
+                    .collect();
+                self.deadline_time_str = cleaned.clone();
+                if let Ok(t) = NaiveTime::parse_from_str(&cleaned, "%H:%M") {
+                    let today = Local::now().date_naive();
+                    if let Some(dt) = Local
+                        .from_local_datetime(&today.and_time(t))
+                        .single()
+                    {
+                        self.settings.next_deadline_at = Some(dt.to_rfc3339());
+                        self.settings.save();
+                    }
+                }
+                Task::none()
+            }
+            #[cfg(feature = "calendar")]
+            Message::ClearDeadline => {
+                self.settings.next_deadline_at = None;
+                self.settings.next_deadline_label.clear();
+                self.deadline_time_str.clear();
+                self.settings.save();
+                Task::none()
+            }
+            #[cfg(feature = "presence")]
+            Message::PresenceReady(result) => {
+                use infra::presence::Presence;
+                match result {
+                    Ok(sample) => {
+                        self.last_presence = Some(sample.presence);
+                        self.presence_error = None;
+                        match sample.presence {
+                            Presence::Absent => {
+                                self.consecutive_absent_samples =
+                                    self.consecutive_absent_samples.saturating_add(1);
+                                let threshold = self.settings.presence_absent_threshold.max(1);
+                                if self.consecutive_absent_samples >= threshold
+                                    && matches!(
+                                        self.pomodoro_engine.state(),
+                                        SolarFocusCore::AppState::Focusing(_)
+                                    )
+                                    && !self.pomodoro_engine.is_paused()
+                                {
+                                    self.pomodoro_engine.pause(0.0);
+                                    log::info!(
+                                        "Presence: auto-paused after {} Absent samples",
+                                        self.consecutive_absent_samples
+                                    );
+                                    self.toast = Some(Toast {
+                                        text: match self.settings.language {
+                                            Language::Es =>
+                                                "Pausado: te alejaste del escritorio.".to_string(),
+                                            Language::En =>
+                                                "Paused: you stepped away.".to_string(),
+                                        },
+                                        expires_at: Instant::now() + Duration::from_secs(4),
+                                    });
+                                }
+                            }
+                            Presence::Present | Presence::Unknown => {
+                                self.consecutive_absent_samples = 0;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Presence: probe error: {}", e);
+                        self.presence_error = Some(e);
+                    }
+                }
                 Task::none()
             }
             Message::SetRamMode(mode) => {
@@ -2416,9 +2693,28 @@ impl App {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
         };
 
+        // v1.3 Wave A2 — category picker only when idle (you choose
+        // before you start; once running, the category is locked in for
+        // that session).
+        let category_picker: Element<'_, Message> = if matches!(
+            self.pomodoro_engine.state(),
+            SolarFocusCore::AppState::Idle | SolarFocusCore::AppState::Completed
+        ) {
+            self.category_picker()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
+        // v1.3 Wave C — "next deadline in Xh Ym" badge when set.
+        let deadline_badge: Element<'_, Message> = self.deadline_badge();
+
         let content = column![
             hero,
-            iced::widget::Space::with_height(Length::Fixed(SPACE_LG as f32)),
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
+            deadline_badge,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
+            category_picker,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
             cta,
             iced::widget::Space::with_height(Length::Fixed(SPACE_MD as f32)),
             microcopy,
@@ -2438,6 +2734,134 @@ impl App {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// v1.3 Wave A2 — Renders the category chip row + free-form text
+    /// input shown above the Start button on the Focus canvas.
+    fn category_picker(&self) -> Element<'_, Message> {
+        use ui::palette::*;
+        let lang = self.settings.language;
+        let presets: &[(&str, &str)] = &[
+            ("Deep work", "Trabajo profundo"),
+            ("Coding", "Código"),
+            ("Reading", "Lectura"),
+            ("Writing", "Escritura"),
+            ("Other", "Otro"),
+        ];
+        let label = match lang {
+            Language::Es => "Categoría de la sesión",
+            Language::En => "Session category",
+        };
+        let current = self.settings.last_category.as_str();
+        let mut chip_row = iced::widget::Row::new().spacing(SPACE_XS as u16);
+        for (en, es) in presets {
+            let display = match lang {
+                Language::Es => *es,
+                Language::En => *en,
+            };
+            let selected = current.eq_ignore_ascii_case(en) || current == display;
+            chip_row = chip_row.push(chip_local(
+                display.to_string(),
+                selected,
+                Message::SetCategory(en.to_string()),
+            ));
+        }
+        let custom_input = iced::widget::text_input(
+            match lang {
+                Language::Es => "Otra…",
+                Language::En => "Other…",
+            },
+            &self.custom_category_str,
+        )
+        .on_input(Message::SetCategoryText)
+        .width(Length::Fixed(160.0))
+        .padding([4, 8])
+        .size(FONT_SMALL);
+
+        container(
+            column![
+                text(label).size(FONT_SMALL).color(TEXT_MUTED),
+                chip_row,
+                custom_input,
+            ]
+            .spacing(SPACE_XS as u16)
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+        .padding(SPACE_SM as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: ACCENT_DIM,
+            },
+            ..Default::default()
+        })
+        .into()
+    }
+
+    /// v1.3 Wave C — small badge under the timer showing how long
+    /// until the user's next configured deadline. Hidden if no deadline
+    /// is set or the deadline is in the past.
+    fn deadline_badge(&self) -> Element<'_, Message> {
+        #[cfg(feature = "calendar")]
+        use ui::palette::*;
+        #[cfg(feature = "calendar")]
+        {
+            if let Some(s) = self.settings.next_deadline_at.as_deref() {
+                if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) {
+                    let when = parsed.with_timezone(&chrono::Local);
+                    let now = chrono::Local::now();
+                    let delta = when - now;
+                    if delta.num_seconds() > 0 {
+                        let mins = delta.num_minutes();
+                        let h = mins / 60;
+                        let m = mins % 60;
+                        let label = if !self.settings.next_deadline_label.is_empty() {
+                            format!(
+                                "{} \"{}\" {} {}h{:02}m",
+                                match self.settings.language {
+                                    Language::Es => "Próximo:",
+                                    Language::En => "Next:",
+                                },
+                                self.settings.next_deadline_label,
+                                match self.settings.language {
+                                    Language::Es => "en",
+                                    Language::En => "in",
+                                },
+                                h,
+                                m,
+                            )
+                        } else {
+                            format!(
+                                "{} {}h{:02}m",
+                                match self.settings.language {
+                                    Language::Es => "Próxima reunión en",
+                                    Language::En => "Next meeting in",
+                                },
+                                h,
+                                m,
+                            )
+                        };
+                        return container(
+                            text(label).size(FONT_SMALL).color(TEXT_SECONDARY),
+                        )
+                        .padding([4, 12])
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(SURFACE_RAISED)),
+                            border: iced::Border {
+                                radius: 6.0.into(),
+                                width: 1.0,
+                                color: ACCENT_DIM,
+                            },
+                            ..Default::default()
+                        })
+                        .into();
+                    }
+                }
+            }
+        }
+        iced::widget::Space::with_height(Length::Fixed(0.0)).into()
     }
 
     fn state_label(&self) -> String {
@@ -2578,7 +3002,12 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(720);
 
-        container(body)
+        // v1.3 rc5 — wrap the Setup body in a scrollable so the AI tab
+        // (which now has 7+ cards including the new Detección de
+        // presencia) remains reachable on shorter windows. The body
+        // column is Length::Shrink by default, so it satisfies the
+        // scrollable child contract that bit us in v1.2.
+        container(iced::widget::scrollable(body))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
@@ -2682,13 +3111,26 @@ impl App {
         let row_chips = |label: String,
                          opts: &[u32],
                          current: u32,
-                         msg: fn(u32) -> Message|
+                         msg: fn(u32) -> Message,
+                         input_buf: &str,
+                         text_msg: fn(String) -> Message,
+                         placeholder: &str|
          -> Element<'_, Message> {
             let mut row = iced::widget::Row::new();
             for &m in opts {
                 row = row.push(chip(format!("{}", m), current == m, msg(m)));
                 row = row.push(iced::widget::Space::with_width(SPACE_XS as f32));
             }
+            // v1.3 Wave A1 — inline custom-duration text input. Width
+            // calibrated for 3 digits + "min" suffix.
+            let input = iced::widget::text_input(placeholder, input_buf)
+                .on_input(text_msg)
+                .width(Length::Fixed(72.0))
+                .padding([4, 8])
+                .size(FONT_SMALL);
+            row = row.push(input);
+            row = row.push(iced::widget::Space::with_width(SPACE_XS as f32));
+            row = row.push(text("min").size(FONT_TINY).color(TEXT_MUTED));
             column![
                 text(label).size(FONT_SMALL).color(TEXT_MUTED),
                 row,
@@ -2717,6 +3159,9 @@ impl App {
                     &[1, 5, 15, 25, 50],
                     self.settings.focus_minutes,
                     Message::SetFocusMinutes,
+                    &self.custom_focus_str,
+                    Message::SetFocusMinutesText,
+                    "25",
                 ),
                 row_chips(
                     format!(
@@ -2730,6 +3175,9 @@ impl App {
                     &[1, 3, 5, 10, 15],
                     self.settings.break_minutes,
                     Message::SetBreakMinutes,
+                    &self.custom_break_str,
+                    Message::SetBreakMinutesText,
+                    "5",
                 ),
                 row_chips(
                     format!(
@@ -2743,12 +3191,15 @@ impl App {
                     &[5, 10, 15, 20, 30],
                     self.settings.long_break_minutes,
                     Message::SetLongBreakMinutes,
+                    &self.custom_long_break_str,
+                    Message::SetLongBreakMinutesText,
+                    "15",
                 ),
                 text(match self.settings.language {
                     Language::Es =>
-                        "Pomodoro clásico: 25 / 5 / 15 (después de 4 sesiones).",
+                        "Pomodoro clásico: 25 / 5 / 15 (después de 4 sesiones). El campo numérico acepta valores personalizados (1–180).",
                     Language::En =>
-                        "Classic Pomodoro: 25 / 5 / 15 (after 4 sessions).",
+                        "Classic Pomodoro: 25 / 5 / 15 (after 4 sessions). The numeric field accepts custom values (1–180).",
                 })
                 .size(FONT_TINY)
                 .color(TEXT_MUTED),
@@ -2795,9 +3246,76 @@ impl App {
             ..Default::default()
         });
 
-        column![lang_card, duration_card, ram_card, shortcuts]
-            .spacing(SPACE_MD as u16)
-            .into()
+        // v1.3 Wave C — manual deadline card. Lets the user type a
+        // label + HH:MM today; the timer canvas surfaces a badge with
+        // "X in Yh Zm" until the deadline passes. v1.3.1 will replace
+        // this with live EventKit data.
+        #[cfg(feature = "calendar")]
+        let deadline_card: Element<'_, Message> = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Próxima reunión / deadline",
+                    Language::En => "Next meeting / deadline",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                iced::widget::row![
+                    iced::widget::text_input(
+                        match self.settings.language {
+                            Language::Es => "Etiqueta (ej. Standup)",
+                            Language::En => "Label (e.g. Standup)",
+                        },
+                        &self.settings.next_deadline_label,
+                    )
+                    .on_input(Message::SetDeadlineLabel)
+                    .padding([4, 8])
+                    .size(FONT_SMALL)
+                    .width(Length::Fixed(220.0)),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    iced::widget::text_input("HH:MM", &self.deadline_time_str)
+                        .on_input(Message::SetDeadlineTime)
+                        .padding([4, 8])
+                        .size(FONT_SMALL)
+                        .width(Length::Fixed(80.0)),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    chip_local(
+                        match self.settings.language {
+                            Language::Es => "Borrar".to_string(),
+                            Language::En => "Clear".to_string(),
+                        },
+                        false,
+                        Message::ClearDeadline,
+                    ),
+                ],
+                text(match self.settings.language {
+                    Language::Es => "v1.3.0: entrada manual. v1.3.1 leerá tu Calendar (iCloud, Google, Exchange) automáticamente.",
+                    Language::En => "v1.3.0: manual entry. v1.3.1 will read your Calendar (iCloud, Google, Exchange) automatically.",
+                })
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: ACCENT_DIM,
+            },
+            ..Default::default()
+        })
+        .into();
+
+        let mut col = iced::widget::Column::new().spacing(SPACE_MD as u16);
+        col = col.push(lang_card).push(duration_card).push(ram_card);
+        #[cfg(feature = "calendar")]
+        {
+            col = col.push(deadline_card);
+        }
+        col = col.push(shortcuts);
+        col.into()
     }
 
     fn lang_button(&self, lang: Language, label: &'static str) -> Element<'_, Message> {
@@ -3152,9 +3670,94 @@ impl App {
             ..Default::default()
         });
 
-        column![banner, perm, transparency, danger_zone]
-            .spacing(SPACE_MD as u16)
-            .into()
+        // v1.3 Wave B — Privacy transparency for camera presence detection.
+        // Only rendered when the `presence` cargo feature is compiled in,
+        // because the user wouldn't otherwise have a way to enable it.
+        #[cfg(feature = "presence")]
+        let presence_transparency: Element<'_, Message> = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "¿Cómo funciona la detección de presencia?",
+                    Language::En => "How does presence detection work?",
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es => "Cuando la activas en Setup → IA, SolarFocus OS pide \
+                                     permiso de Cámara. Una vez al segundo durante una \
+                                     sesión de foco activa:",
+                    Language::En => "When you turn it on in Setup → AI, SolarFocus OS \
+                                     requests Camera permission. Once per second during \
+                                     an active focus session:",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                text(match self.settings.language {
+                    Language::Es => "  ·  Captura un frame en escala de grises (320×240).",
+                    Language::En => "  ·  Captures one grayscale frame (320×240).",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es => "  ·  Calcula la luminancia promedio del frame.",
+                    Language::En => "  ·  Computes the frame's average luminance.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es => "  ·  Compara contra el frame anterior. Si la luz cambia \
+                                     bruscamente (te alejaste, apagaste la luz), marca \
+                                     'Ausente'. El frame se descarta inmediatamente.",
+                    Language::En => "  ·  Compares against the previous frame. A sharp \
+                                     swing (you stepped away, lights off) flags 'Absent'. \
+                                     The frame is dropped immediately.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_PRIMARY),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                text(match self.settings.language {
+                    Language::Es => "Tras 3 muestras consecutivas marcadas 'Ausente', \
+                                     la sesión se pausa automáticamente.",
+                    Language::En => "After 3 consecutive 'Absent' samples, the session \
+                                     auto-pauses.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                text(match self.settings.language {
+                    Language::Es => "Lo que NO hacemos: grabar video, guardar imágenes, \
+                                     hacer reconocimiento facial, identificar personas, \
+                                     ni enviar nada por la red. La cámara solo se enciende \
+                                     mientras una sesión está activa y la opción está activada.",
+                    Language::En => "What we DO NOT do: record video, save images, do \
+                                     facial recognition, identify people, or send anything \
+                                     over the network. The camera only turns on while a \
+                                     session is active and the option is enabled.",
+                })
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into();
+
+        let mut col = iced::widget::Column::new().spacing(SPACE_MD as u16);
+        col = col.push(banner).push(perm).push(transparency);
+        #[cfg(feature = "presence")]
+        {
+            col = col.push(presence_transparency);
+        }
+        col = col.push(danger_zone);
+        col.into()
     }
 
     fn view_setup_about(&self) -> Element<'_, Message> {
@@ -3849,17 +4452,89 @@ impl App {
                 .into()
         };
 
-        let content = column![
-            ai_toggle_card,
-            watch_toggle_card,
-            model_picker_card,
-            model_status_card,
-            classifier_card,
-            distilbert_card,
-            advanced_card,
-        ]
-        .spacing(SPACE_MD as u16)
-        .max_width(640);
+        // v1.3 Wave B — presence detection card (only shown when the
+        // `presence` cargo feature is compiled in).
+        #[cfg(feature = "presence")]
+        let presence_card: Element<'_, Message> = {
+            let body: Element<'_, Message> = if let Some(err) = &self.presence_error {
+                column![
+                    text(pick(
+                        "No se pudo iniciar la cámara.",
+                        "Camera initialization failed.",
+                    ))
+                    .size(FONT_BODY)
+                    .color(DANGER),
+                    text(err.clone()).size(FONT_TINY).color(TEXT_MUTED),
+                    chip_local(
+                        pick("Reintentar", "Retry").to_string(),
+                        false,
+                        Message::TogglePresence(true),
+                    ),
+                ]
+                .spacing(SPACE_SM as u16)
+                .into()
+            } else {
+                let status_label: String = match self.last_presence {
+                    Some(infra::presence::Presence::Present) => pick("Presente", "Present").to_string(),
+                    Some(infra::presence::Presence::Absent) => pick("Ausente", "Absent").to_string(),
+                    Some(infra::presence::Presence::Unknown) | None => {
+                        pick("—", "—").to_string()
+                    }
+                };
+                column![
+                    iced::widget::row![
+                        text(if self.settings.presence_enabled {
+                            pick("Activada", "Enabled")
+                        } else {
+                            pick("Desactivada", "Disabled")
+                        })
+                        .size(FONT_BODY)
+                        .color(TEXT_PRIMARY),
+                        iced::widget::horizontal_space(),
+                        chip_local(
+                            if self.settings.presence_enabled {
+                                pick("Desactivar", "Disable").to_string()
+                            } else {
+                                pick("Activar", "Enable").to_string()
+                            },
+                            false,
+                            Message::TogglePresence(!self.settings.presence_enabled),
+                        ),
+                    ],
+                    text(format!(
+                        "{}: {}",
+                        pick("Estado", "Status"),
+                        status_label
+                    ))
+                    .size(FONT_TINY)
+                    .color(TEXT_MUTED),
+                    text(pick(
+                        "v1.3.0 usa un detector por luminosidad (cambios bruscos = ausente). v1.3.1 añadirá detección facial con YuNet ONNX.",
+                        "v1.3.0 uses a brightness-change detector (sharp swings = absent). v1.3.1 will add YuNet ONNX face detection.",
+                    ))
+                    .size(FONT_TINY)
+                    .color(TEXT_MUTED),
+                ]
+                .spacing(SPACE_SM as u16)
+                .into()
+            };
+            settings_card_local(pick("Detección de presencia", "Presence detection"), body)
+        };
+
+        let mut card_col = iced::widget::Column::new().spacing(SPACE_MD as u16);
+        card_col = card_col
+            .push(ai_toggle_card)
+            .push(watch_toggle_card)
+            .push(model_picker_card)
+            .push(model_status_card)
+            .push(classifier_card)
+            .push(distilbert_card);
+        #[cfg(feature = "presence")]
+        {
+            card_col = card_col.push(presence_card);
+        }
+        card_col = card_col.push(advanced_card);
+        let content = card_col.max_width(640);
 
         // FIX-A (rc15): no outer background or padding — parent
         // view_setup_tabs already provides BG + canvas padding.
@@ -3945,6 +4620,56 @@ fn on_off(b: bool) -> &'static str {
         "ON"
     } else {
         "OFF"
+    }
+}
+
+// v1.3 Wave A1 — strip non-digits and cap length so the input stays a
+// well-behaved numeric field even if the user pastes garbage.
+fn digits_only(s: &str, max_len: usize) -> String {
+    s.chars().filter(|c| c.is_ascii_digit()).take(max_len).collect()
+}
+
+// Parse a digit string into a u32, returning None if outside [min, max].
+fn parse_minutes(s: &str, min: u32, max: u32) -> Option<u32> {
+    s.parse::<u32>().ok().filter(|m| (min..=max).contains(m))
+}
+
+#[cfg(test)]
+mod custom_duration_tests {
+    use super::{digits_only, parse_minutes};
+
+    #[test]
+    fn digits_only_strips_letters_and_symbols() {
+        assert_eq!(digits_only("a1b2c3!@#", 10), "123");
+        assert_eq!(digits_only("", 10), "");
+        assert_eq!(digits_only("abc", 10), "");
+    }
+
+    #[test]
+    fn digits_only_caps_length() {
+        assert_eq!(digits_only("12345", 3), "123");
+        assert_eq!(digits_only("9999", 4), "9999");
+    }
+
+    #[test]
+    fn parse_minutes_in_range() {
+        assert_eq!(parse_minutes("1", 1, 180), Some(1));
+        assert_eq!(parse_minutes("25", 1, 180), Some(25));
+        assert_eq!(parse_minutes("180", 1, 180), Some(180));
+    }
+
+    #[test]
+    fn parse_minutes_rejects_out_of_range() {
+        assert_eq!(parse_minutes("0", 1, 180), None);
+        assert_eq!(parse_minutes("181", 1, 180), None);
+        assert_eq!(parse_minutes("9999", 1, 180), None);
+    }
+
+    #[test]
+    fn parse_minutes_rejects_garbage() {
+        assert_eq!(parse_minutes("", 1, 180), None);
+        assert_eq!(parse_minutes("abc", 1, 180), None);
+        assert_eq!(parse_minutes("-5", 1, 180), None);
     }
 }
 

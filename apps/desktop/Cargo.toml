@@ -32,6 +32,15 @@ ndarray = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 # ENH-7 — share the download stack with the classifier feature too.
 
+# v1.3 Wave B — webcam capture for presence detection (feature-gated).
+# nokhwa = pure-Rust AVFoundation binding on macOS. Avoids opencv-rust.
+nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-avfoundation"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+
+# v1.3 Wave C — calendar awareness. v1.3.0 ships the pure free-block
+# algorithm + manual deadline input. v1.3.1 will add live EventKit
+# bindings (objc2-event-kit) for iCloud / Google / Exchange / Local.
+
 [features]
 default = []
 # Enabling `llm` pulls in llama-cpp-2 (C++ build, ~2-3 min cold) + the
@@ -52,6 +61,19 @@ classifier = [
     "dep:futures-util",
     "dep:fs2",
 ]
+
+# v1.3 Wave B — camera-based presence detection. nokhwa for capture.
+# v1.3.0 ships brightness-change heuristic (no model dependency); v1.3.1
+# will add YuNet ONNX face detection.
+presence = [
+    "dep:nokhwa",
+    "dep:image",
+]
+
+# v1.3 Wave C — calendar-aware focus suggestions. v1.3.0 ships the
+# free-block algorithm + manual deadline input (no extra deps);
+# v1.3.1 will add live EventKit reader behind the same feature flag.
+calendar = []
 
 [[bin]]
 name = "solarfocus-desktop"

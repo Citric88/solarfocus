@@ -5,7 +5,7 @@
 **Pomodoro de escritorio con coach de IA que vive en tu equipo.**
 Privacidad por diseño — sin nube, sin telemetría, sin cuenta.
 
-[![estado](https://img.shields.io/badge/estado-v1.2.0--rc16-brightgreen)]()
+[![estado](https://img.shields.io/badge/estado-v1.3.0--rc4-brightgreen)]()
 [![rust](https://img.shields.io/badge/rust-1.78%2B-orange)]()
 [![iced](https://img.shields.io/badge/iced-0.13-blueviolet)]()
 [![plataforma](https://img.shields.io/badge/macOS-Apple%20Silicon-black)]()
@@ -26,6 +26,22 @@ tu máquina.
 Está construida en Rust con [iced 0.13](https://iced.rs/) y optimizada
 para Apple Silicon, con aceleración Metal opcional para el modelo de
 lenguaje.
+
+## Novedades v1.3 — *Aware Pomodoro*
+
+- **Modo personalizado de duración** — chips de 1 / 5 / 15 / 25 / 50
+  min más un campo numérico para cualquier valor entre 1 y 180.
+- **Categorías de sesión nombradas** — Deep work / Coding / Reading /
+  Writing / Other o etiqueta libre. Se persisten en SQLite y el
+  coach ajusta el mensaje según la categoría.
+- **Detección de presencia por cámara** (opt-in, feature `presence`)
+  — pausa automáticamente la sesión cuando te alejas del escritorio,
+  usando un detector por luminosidad (sin grabar, sin reconocimiento
+  facial). v1.3.1 añadirá YuNet ONNX para detección facial.
+- **Conciencia de calendario** (feature `calendar`) — entrada manual
+  de "próxima reunión" + badge en el cronómetro mostrando "X en Yh
+  Zm". v1.3.1 añadirá lectura automática de Calendar (iCloud /
+  Google / Exchange / Local) vía EventKit.
 
 ## Características
 
@@ -108,6 +124,8 @@ cargo run --features llm,classifier,gpu-metal
 | `classifier` | Clasificador DistilBERT INT8 vía `ort` |
 | `gpu-metal` | Aceleración Metal en Apple Silicon |
 | `gpu-cuda` | Aceleración CUDA (Linux/Windows con NVIDIA) |
+| `presence` | Detección de presencia con cámara (v1.3) |
+| `calendar` | Conciencia de calendario / próximos deadlines (v1.3) |
 
 ## Arquitectura
 
