@@ -2344,13 +2344,24 @@ impl App {
                         })
                         .unwrap_or(0);
                     let attention = 100u32.saturating_sub(distract_count.saturating_mul(20));
-                    let attention_color = if attention >= 80 {
-                        ACCENT
+                    // v1.5.0 — replace inline-styled containers with
+                    // `badge_local`. Variant follows attention banding.
+                    let attention_variant = if attention >= 80 {
+                        BadgeVariant::Accent
                     } else if attention >= 50 {
-                        WARNING
+                        BadgeVariant::Warning
                     } else {
-                        DANGER
+                        BadgeVariant::Danger
                     };
+                    let attention_label = match self.settings.language {
+                        Language::Es => format!("Atención {}%", attention),
+                        Language::En => format!("Focus {}%", attention),
+                    };
+                    // v1.5.0 — `state` removed from the row. The list
+                    // only shows completed sessions (incomplete never
+                    // reach this query), so the redundant tag was
+                    // adding noise without meaning.
+                    let _ = &s.state;
                     container(
                         iced::widget::row![
                             text(when).size(FONT_SMALL).color(TEXT_SECONDARY),
@@ -2359,52 +2370,13 @@ impl App {
                                 .size(FONT_SMALL)
                                 .color(TEXT_PRIMARY),
                             iced::widget::Space::with_width(SPACE_SM as f32),
-                            // v1.4.0 — category chip-style label.
-                            container(
-                                text(s.category.clone())
-                                    .size(FONT_TINY)
-                                    .color(ACCENT),
-                            )
-                            .padding([2, 8])
-                            .style(|_| container::Style {
-                                background: Some(iced::Background::Color(SURFACE_RAISED)),
-                                border: iced::Border {
-                                    radius: 4.0.into(),
-                                    width: 1.0,
-                                    color: ACCENT_DIM,
-                                },
-                                ..Default::default()
-                            }),
+                            badge_local(s.category.clone(), BadgeVariant::Accent),
                             iced::widget::Space::with_width(SPACE_SM as f32),
-                            // v1.4.0 — attention score badge.
-                            container(
-                                text(format!(
-                                    "{}{}",
-                                    match self.settings.language {
-                                        Language::Es => "Atención ",
-                                        Language::En => "Focus ",
-                                    },
-                                    format!("{}%", attention),
-                                ))
-                                .size(FONT_TINY)
-                                .color(attention_color),
-                            )
-                            .padding([2, 8])
-                            .style(move |_| container::Style {
-                                background: Some(iced::Background::Color(SURFACE_RAISED)),
-                                border: iced::Border {
-                                    radius: 4.0.into(),
-                                    width: 1.0,
-                                    color: attention_color,
-                                },
-                                ..Default::default()
-                            }),
+                            badge_local(attention_label, attention_variant),
                             iced::widget::horizontal_space(),
-                            text(s.state.clone())
-                                .size(FONT_TINY)
-                                .color(TEXT_MUTED),
                         ]
-                        .padding(SPACE_XS as u16),
+                        .padding(SPACE_XS as u16)
+                        .align_y(iced::alignment::Vertical::Center),
                     )
                     .padding(SPACE_XS as u16)
                     .into()
@@ -3161,11 +3133,30 @@ impl App {
             recent
                 .into_iter()
                 .map(|(when, rating, msg)| {
-                    let glyph = if rating > 0 { "+" } else { "−" };
-                    let glyph_color = if rating > 0 { ACCENT } else { DANGER };
+                    // v1.5.0 — replace inline +/- glyph + container
+                    // with `badge_local` for the rating signal. The
+                    // outer card stays SURFACE (no border) because the
+                    // history visually nests inside the parent column.
+                    let (rating_label, rating_variant) = if rating > 0 {
+                        (
+                            match lang {
+                                Language::Es => "Útil",
+                                Language::En => "Helpful",
+                            },
+                            BadgeVariant::Accent,
+                        )
+                    } else {
+                        (
+                            match lang {
+                                Language::Es => "No útil",
+                                Language::En => "Not helpful",
+                            },
+                            BadgeVariant::Danger,
+                        )
+                    };
                     container(
                         iced::widget::row![
-                            text(glyph.to_string()).size(FONT_LEAD).color(glyph_color),
+                            badge_local(rating_label.to_string(), rating_variant),
                             iced::widget::Space::with_width(SPACE_SM as f32),
                             column![
                                 text(msg).size(FONT_SMALL).color(TEXT_PRIMARY),
@@ -3173,7 +3164,8 @@ impl App {
                             ]
                             .spacing(2),
                         ]
-                        .padding(SPACE_SM as u16),
+                        .padding(SPACE_SM as u16)
+                        .align_y(iced::alignment::Vertical::Center),
                     )
                     .padding(SPACE_XS as u16)
                     .width(Length::Fixed(640.0))
@@ -4284,29 +4276,25 @@ impl App {
                     })
                     .size(FONT_SMALL)
                     .color(DANGER),
+                    // v1.5.0 — destructive_button + ghost_button.
+                    // Removes the inline DANGER/BG block + the
+                    // unstyled cancel button.
                     iced::widget::row![
-                        iced::widget::button(text(match self.settings.language {
-                            Language::Es => "Sí, borrar todo",
-                            Language::En => "Yes, clear all",
-                        }))
-                        .on_press(Message::ConfirmClearData)
-                        .padding([6, 14])
-                        .style(|_, _| iced::widget::button::Style {
-                            background: Some(iced::Background::Color(DANGER)),
-                            text_color: BG,
-                            border: iced::Border {
-                                radius: 6.0.into(),
-                                ..Default::default()
+                        destructive_button(
+                            match self.settings.language {
+                                Language::Es => "Sí, borrar todo".to_string(),
+                                Language::En => "Yes, clear all".to_string(),
                             },
-                            ..Default::default()
-                        }),
+                            Message::ConfirmClearData,
+                        ),
                         iced::widget::Space::with_width(SPACE_SM as f32),
-                        iced::widget::button(text(match self.settings.language {
-                            Language::Es => "Cancelar",
-                            Language::En => "Cancel",
-                        }))
-                        .on_press(Message::CancelClearData)
-                        .padding([6, 14]),
+                        ghost_button(
+                            match self.settings.language {
+                                Language::Es => "Cancelar",
+                                Language::En => "Cancel",
+                            },
+                            Message::CancelClearData,
+                        ),
                     ],
                 ]
                 .spacing(SPACE_SM as u16),
@@ -4343,22 +4331,15 @@ impl App {
                     ]
                     .spacing(2),
                     iced::widget::horizontal_space(),
-                    iced::widget::button(text(match self.settings.language {
-                        Language::Es => "Borrar todos los datos",
-                        Language::En => "Clear all data",
-                    }))
-                    .on_press(Message::RequestClearData)
-                    .padding([6, 14])
-                    .style(|_, _| iced::widget::button::Style {
-                        background: Some(iced::Background::Color(SURFACE_RAISED)),
-                        text_color: DANGER,
-                        border: iced::Border {
-                            color: DANGER,
-                            width: 1.0,
-                            radius: 6.0.into(),
+                    // v1.5.0 — same destructive primitive used in the
+                    // confirm step.
+                    destructive_button(
+                        match self.settings.language {
+                            Language::Es => "Borrar todos los datos".to_string(),
+                            Language::En => "Clear all data".to_string(),
                         },
-                        ..Default::default()
-                    }),
+                        Message::RequestClearData,
+                    ),
                 ]
                 .padding(SPACE_SM as u16),
             )
@@ -5424,6 +5405,71 @@ fn chip_local<'a>(label: String, selected: bool, msg: Message) -> Element<'a, Me
         }
     })
     .into()
+}
+
+/// v1.5.0 — Pure visual label, not interactive. Replaces the half-dozen
+/// inline-styled "small bordered text container" patterns scattered
+/// across Stats / Coach / Setup. Pick a variant for the semantic color;
+/// the surface is always `SURFACE_RAISED` with a 1px border in the
+/// variant color.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // Some variants used only by future call sites.
+enum BadgeVariant {
+    Accent,
+    Muted,
+    Warning,
+    Danger,
+}
+
+fn badge_local<'a>(label: String, variant: BadgeVariant) -> Element<'a, Message> {
+    use ui::palette::*;
+    let color = match variant {
+        BadgeVariant::Accent => ACCENT,
+        BadgeVariant::Muted => TEXT_MUTED,
+        BadgeVariant::Warning => WARNING,
+        BadgeVariant::Danger => DANGER,
+    };
+    container(text(label).size(FONT_TINY).color(color))
+        .padding([2, 8])
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(SURFACE_RAISED)),
+            border: iced::Border {
+                radius: 4.0.into(),
+                width: 1.0,
+                color,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// v1.5.0 — Destructive action button. DANGER border + DANGER text on
+/// transparent background; hover fills with low-alpha DANGER. Used in
+/// Privacy "Borrar todos los datos", Coach "Limpiar historial", Setup
+/// AI "Eliminar modelo" — anywhere a click is irreversible.
+fn destructive_button<'a>(label: String, msg: Message) -> Element<'a, Message> {
+    use ui::palette::*;
+    iced::widget::button(text(label).size(FONT_SMALL).color(DANGER))
+        .on_press(msg)
+        .padding([6, 14])
+        .style(move |_, status| {
+            let hovered = matches!(status, iced::widget::button::Status::Hovered);
+            iced::widget::button::Style {
+                background: Some(iced::Background::Color(if hovered {
+                    Color { r: DANGER.r, g: DANGER.g, b: DANGER.b, a: 0.12 }
+                } else {
+                    Color::TRANSPARENT
+                })),
+                text_color: DANGER,
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    width: 1.5,
+                    color: DANGER,
+                },
+                ..Default::default()
+            }
+        })
+        .into()
 }
 
 #[allow(dead_code)] // No longer used after FIX-3 AI tab rewrite; kept for compatibility.
