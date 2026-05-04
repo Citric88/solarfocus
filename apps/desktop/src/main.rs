@@ -2239,6 +2239,39 @@ impl App {
                 "Checking permission…",
             ),
         };
+        // v1.4.1 — when permission is not Granted, surface the same
+        // "Open System Settings" + "Re-verify" actions that already
+        // exist in the Privacy tab so the user can fix it in one
+        // click without hunting for it. macOS does persist the grant
+        // (no need to re-grant every launch); the most common cause
+        // of seeing "Sin permiso" after a previous Allow is having
+        // not restarted the app after granting in System Settings.
+        let perm_actions: Element<'_, Message> =
+            if !matches!(self.permission_status, PermissionStatus::Granted) {
+                iced::widget::row![
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    chip_local(
+                        match self.settings.language {
+                            Language::Es => "Abrir Ajustes del sistema".to_string(),
+                            Language::En => "Open System Settings".to_string(),
+                        },
+                        false,
+                        Message::OpenSystemSettings,
+                    ),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    chip_local(
+                        match self.settings.language {
+                            Language::Es => "Re-verificar".to_string(),
+                            Language::En => "Re-check".to_string(),
+                        },
+                        false,
+                        Message::ProbePermission,
+                    ),
+                ]
+                .into()
+            } else {
+                iced::widget::Space::with_width(Length::Fixed(0.0)).into()
+            };
         let perm_card: Element<'_, Message> = container(
             iced::widget::row![
                 text("●").size(FONT_LEAD).color(perm_color),
@@ -2250,8 +2283,11 @@ impl App {
                 })
                 .size(FONT_SMALL)
                 .color(TEXT_PRIMARY),
+                iced::widget::horizontal_space(),
+                perm_actions,
             ]
-            .padding(SPACE_SM as u16),
+            .padding(SPACE_SM as u16)
+            .align_y(iced::alignment::Vertical::Center),
         )
         .padding(SPACE_XS as u16)
         .style(|_| container::Style {

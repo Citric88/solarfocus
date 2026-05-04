@@ -323,9 +323,12 @@ impl SessionRepository {
     /// Sesiones para una fecha concreta (ISO YYYY-MM-DD). Usado por el
     /// scheduler de resumen diario para procesar el día anterior.
     pub fn sessions_for_date(&self, date: &str) -> SqlResult<Vec<SessionRecord>> {
+        // v1.4.1 — newest first so Stats canvas shows the most recent
+        // session at the top (was ASC; users expect activity-feed
+        // ordering, not chronological).
         let mut stmt = self.conn.prepare(
             "SELECT id, start_time, duration, state, category FROM sessions
-             WHERE date(start_time) = ? ORDER BY start_time ASC",
+             WHERE date(start_time) = ? ORDER BY start_time DESC",
         )?;
         let mut rows = stmt.query(rusqlite::params![date])?;
         let mut records = Vec::new();
