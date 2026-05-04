@@ -100,6 +100,21 @@ impl SessionRepository {
             [],
         )?;
 
+        // v1.4.0 — confirmed distraction events (after the 2-sample
+        // gate). Used by Stats canvas to surface "top distractions
+        // last 7 days". Process name + matched rule + confidence;
+        // window title is NOT persisted (privacy contract).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS distraction_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at TEXT NOT NULL,
+                process_name TEXT NOT NULL,
+                rule TEXT,
+                confidence REAL NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
 
@@ -201,6 +216,44 @@ impl SessionRepository {
             )?;
             Ok(self.conn.last_insert_rowid() as u64)
         }
+    }
+
+    /// v1.4.0 — log a confirmed distraction event.
+    pub fn save_distraction(
+        &self,
+        process: &str,
+        rule: Option<&str>,
+        confidence: f32,
+    ) -> SqlResult<u64> {
+        let now = chrono::Local::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO distraction_events (at, process_name, rule, confidence) VALUES (?, ?, ?, ?)",
+            rusqlite::params![now, process, rule, confidence as f64],
+        )?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    /// v1.4.0 — top processes that confirmed as distractions over the
+    /// last N days. Returns Vec<(process, count)> sorted by count desc.
+    pub fn top_distractions_last_days(
+        &self,
+        days: u32,
+        limit: u32,
+    ) -> SqlResult<Vec<(String, u32)>> {
+        let cutoff = format!("-{} days", days.saturating_sub(1));
+        let mut stmt = self.conn.prepare(
+            "SELECT process_name, COUNT(*) FROM distraction_events
+             WHERE date(at) >= date('now', ?)
+             GROUP BY process_name
+             ORDER BY COUNT(*) DESC
+             LIMIT ?",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![cutoff, limit])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push((r.get::<_, String>(0)?, r.get::<_, u32>(1)?));
+        }
+        Ok(out)
     }
 
     /// v1.3 Wave A2 — totals grouped by category over the last N days
@@ -505,6 +558,20 @@ mod tests {
         let cats: Vec<&str> = totals.iter().map(|(c, _, _)| c.as_str()).collect();
         assert!(cats.contains(&"Coding"));
         assert!(cats.contains(&"Focus"));
+    }
+
+    /// v1.4.0 — confirmed distraction events persist + aggregate.
+    #[test]
+    fn distraction_events_persist_and_rank() {
+        let repo = fresh_repo();
+        repo.save_distraction("tiktok", Some("deny:tiktok"), 0.95).unwrap();
+        repo.save_distraction("tiktok", Some("deny:tiktok"), 0.91).unwrap();
+        repo.save_distraction("instagram", Some("deny:instagram"), 0.88).unwrap();
+
+        let top = repo.top_distractions_last_days(7, 5).unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0], ("tiktok".to_string(), 2));
+        assert_eq!(top[1], ("instagram".to_string(), 1));
     }
 
     /// FIX-4 (rc14) — clear_feedback empties the table and zeroes the counts.

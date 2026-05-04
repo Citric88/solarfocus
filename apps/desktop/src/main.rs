@@ -992,6 +992,29 @@ impl App {
                         self.focus_rules.record_distraction();
                         self.distractions_today =
                             self.distractions_today.saturating_add(1);
+                        // v1.4.0 — persist confirmed distraction so the
+                        // Stats canvas can show recent top offenders.
+                        // The "process" we record is the rule's keyword
+                        // (e.g. "deny:tiktok" → "tiktok") because rule
+                        // names already cluster equivalent surfaces
+                        // (e.g. tiktok web vs app vs URL match).
+                        if let Some(repo) = self.session_repo.as_ref() {
+                            let display_name: String = c
+                                .matched_rule
+                                .as_deref()
+                                .map(|r| {
+                                    r.splitn(2, ':')
+                                        .nth(1)
+                                        .unwrap_or(r)
+                                        .to_string()
+                                })
+                                .unwrap_or_else(|| "(sin nombre)".to_string());
+                            let _ = repo.save_distraction(
+                                &display_name,
+                                c.matched_rule.as_deref(),
+                                c.confidence,
+                            );
+                        }
                         log::warn!(
                             "Distraction confirmed (consecutive={}, today={}, rule={:?})",
                             self.consecutive_distraction_samples,
@@ -2453,6 +2476,94 @@ impl App {
                 .into()
         };
 
+        // v1.4.0 rc2 — top distractions (last 7 days).
+        let top_distractions = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.top_distractions_last_days(7, 6).ok())
+            .unwrap_or_default();
+        let distractions_card: Element<'_, Message> = {
+            let title = text(match self.settings.language {
+                Language::Es => "Distracciones más frecuentes · últimos 7 días",
+                Language::En => "Top distractions · last 7 days",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED);
+            let inner: Element<'_, Message> = if top_distractions.is_empty() {
+                text(match self.settings.language {
+                    Language::Es => "Sin distracciones registradas en los últimos 7 días. Buen trabajo.",
+                    Language::En => "No distractions logged in the last 7 days. Nice.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED)
+                .into()
+            } else {
+                let max_count = top_distractions
+                    .iter()
+                    .map(|(_, c)| *c)
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+                let rows: Vec<Element<'_, Message>> = top_distractions
+                    .iter()
+                    .map(|(name, count)| {
+                        let bar_w = (*count as f32 / max_count as f32 * 280.0).max(2.0);
+                        let bar = iced::widget::container(
+                            iced::widget::Space::with_height(Length::Fixed(8.0)),
+                        )
+                        .width(Length::Fixed(bar_w))
+                        .height(Length::Fixed(8.0))
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(DANGER)),
+                            border: iced::Border {
+                                radius: 4.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        });
+                        container(
+                            column![
+                                iced::widget::row![
+                                    text(name.clone())
+                                        .size(FONT_BODY)
+                                        .color(TEXT_PRIMARY),
+                                    iced::widget::horizontal_space(),
+                                    text(format!(
+                                        "{} {}",
+                                        count,
+                                        match self.settings.language {
+                                            Language::Es => if *count == 1 { "vez" } else { "veces" },
+                                            Language::En => if *count == 1 { "hit" } else { "hits" },
+                                        },
+                                    ))
+                                    .size(FONT_TINY)
+                                    .color(TEXT_SECONDARY),
+                                ],
+                                bar,
+                            ]
+                            .spacing(SPACE_XS as u16),
+                        )
+                        .padding([SPACE_XS as u16, 0])
+                        .into()
+                    })
+                    .collect();
+                column(rows).spacing(SPACE_SM as u16).into()
+            };
+            container(column![title, inner].spacing(SPACE_SM as u16))
+                .padding(SPACE_MD as u16)
+                .width(Length::Fixed(560.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: ACCENT_DIM,
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
+
         let body = column![
             text(match self.settings.language {
                 Language::Es => "Estadísticas",
@@ -2464,6 +2575,7 @@ impl App {
             cards,
             chart_card,
             category_card,
+            distractions_card,
             recap_card,
             sessions_title,
             sessions_list,
