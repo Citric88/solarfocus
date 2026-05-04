@@ -1251,6 +1251,46 @@ impl App {
                 self.recap = None;
                 Task::none()
             }
+
+            Message::ExportJson => {
+                let result = match self.session_repo.as_ref() {
+                    Some(repo) => crate::infra::export::export_json(repo),
+                    None => return Task::none(),
+                };
+                let toast_text = match (&result, self.settings.language) {
+                    (Ok(p), Language::Es) => {
+                        format!("Exportado: {}", p.display())
+                    }
+                    (Ok(p), Language::En) => {
+                        format!("Exported: {}", p.display())
+                    }
+                    (Err(e), Language::Es) => format!("Error al exportar: {e}"),
+                    (Err(e), Language::En) => format!("Export error: {e}"),
+                };
+                self.toast = Some(Toast {
+                    text: toast_text,
+                    expires_at: Instant::now() + Duration::from_secs(5),
+                });
+                Task::none()
+            }
+
+            Message::ExportCsv => {
+                let result = match self.session_repo.as_ref() {
+                    Some(repo) => crate::infra::export::export_csv(repo),
+                    None => return Task::none(),
+                };
+                let toast_text = match (&result, self.settings.language) {
+                    (Ok(p), Language::Es) => format!("Exportado: {}", p.display()),
+                    (Ok(p), Language::En) => format!("Exported: {}", p.display()),
+                    (Err(e), Language::Es) => format!("Error al exportar: {e}"),
+                    (Err(e), Language::En) => format!("Export error: {e}"),
+                };
+                self.toast = Some(Toast {
+                    text: toast_text,
+                    expires_at: Instant::now() + Duration::from_secs(5),
+                });
+                Task::none()
+            }
         }
     }
 }

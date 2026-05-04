@@ -444,6 +444,57 @@ impl SessionRepository {
         Ok(records)
     }
 
+    /// v1.8.0 — every session ever, oldest first. Powers JSON/CSV export.
+    pub fn export_all_sessions(&self) -> SqlResult<Vec<SessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, start_time, duration, state, category FROM sessions ORDER BY start_time ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            records.push(row_to_record(row)?);
+        }
+        Ok(records)
+    }
+
+    /// v1.8.0 — full distraction history (id, at, process, rule, confidence).
+    pub fn export_all_distractions(
+        &self,
+    ) -> SqlResult<Vec<(u64, String, String, Option<String>, f32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, at, process_name, rule, confidence FROM distraction_events ORDER BY at ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, f64>(4)? as f32,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// v1.8.0 — every daily summary (date, text, model_id).
+    pub fn export_all_summaries(&self) -> SqlResult<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT date, text, model_id FROM daily_summaries ORDER BY date ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ));
+        }
+        Ok(out)
+    }
+
     /// Limpia sesiones antiguas (más de 90 días) - mantenimiento
     pub fn cleanup_old_sessions(&self) -> SqlResult<usize> {
         self.conn.execute(

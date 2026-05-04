@@ -6,7 +6,7 @@
 use iced::widget::{column, container, text};
 use iced::Element;
 
-use crate::ui::components::{destructive_button, ghost_button};
+use crate::ui::components::{destructive_button, ghost_button, secondary_button};
 use crate::ui::palette::*;
 use crate::{App, Message, PermissionStatus};
 use solar_focus_intelligence::Language;
@@ -346,13 +346,63 @@ impl App {
         })
         .into();
 
+        let export_card = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Exportar tus datos",
+                    Language::En => "Export your data",
+                })
+                .size(FONT_BODY)
+                .color(TEXT_PRIMARY),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Descarga tu historial de sesiones, distracciones y resúmenes \
+                         a tu carpeta Descargas. JSON conserva todo; CSV es solo sesiones.",
+                    Language::En =>
+                        "Download your sessions, distractions and summaries to your \
+                         Downloads folder. JSON is the full dump; CSV is sessions only.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                iced::widget::row![
+                    secondary_button(
+                        match self.settings.language {
+                            Language::Es => "Exportar JSON",
+                            Language::En => "Export JSON",
+                        },
+                        Message::ExportJson,
+                    ),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    secondary_button(
+                        match self.settings.language {
+                            Language::Es => "Exportar CSV",
+                            Language::En => "Export CSV",
+                        },
+                        Message::ExportCsv,
+                    ),
+                ],
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: ACCENT_DIM,
+            },
+            ..Default::default()
+        });
+
         let mut col = iced::widget::Column::new().spacing(SPACE_MD as u16);
         col = col.push(banner).push(perm).push(transparency);
         #[cfg(feature = "presence")]
         {
             col = col.push(presence_transparency);
         }
-        col = col.push(danger_zone);
+        col = col.push(export_card).push(danger_zone);
         col.into()
     }
 }

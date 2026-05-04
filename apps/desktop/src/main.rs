@@ -158,6 +158,10 @@ pub enum Message {
     DailyRollCheck,
     DailySummaryReady { date: String, text: String },
     DismissRecap,
+
+    // v1.8.0 — JSON/CSV export to Downloads
+    ExportJson,
+    ExportCsv,
 }
 
 
