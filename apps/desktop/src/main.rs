@@ -515,6 +515,15 @@ impl App {
                 if Settings::load().calendar_live_enabled {
                     tasks.push(Task::done(Message::ToggleCalendarLive(true)));
                 }
+                // v1.4.0 rc11 — same boot-time auto-restore for camera
+                // presence. macOS Camera permission only prompts once;
+                // subsequent boots open the camera silently. Without
+                // this the user had to manually Desactivar+Activar
+                // every launch (caught in live test).
+                #[cfg(feature = "presence")]
+                if Settings::load().presence_enabled {
+                    tasks.push(Task::done(Message::TogglePresence(true)));
+                }
                 Task::batch(tasks)
             },
         )
@@ -1021,6 +1030,28 @@ impl App {
                             self.distractions_today,
                             c.matched_rule
                         );
+                        // v1.4.0 rc11 — fire a real macOS notification
+                        // via osascript so the alert reaches the user
+                        // even when they're on the distracting app.
+                        // Toast alone was missing the moment because
+                        // the user is by definition not looking at
+                        // SolarFocus when a window distraction fires.
+                        #[cfg(target_os = "macos")]
+                        {
+                            let rule = c.matched_rule.clone()
+                                .unwrap_or_else(|| "?".to_string());
+                            let body = match self.settings.language {
+                                Language::Es => format!("Distracción: {}. Vuelve al foco.", rule),
+                                Language::En => format!("Distraction: {}. Refocus.", rule),
+                            };
+                            let _ = std::process::Command::new("osascript")
+                                .arg("-e")
+                                .arg(format!(
+                                    r#"display notification "{}" with title "SolarFocus OS" sound name "Submarine""#,
+                                    body.replace('"', "\\\""),
+                                ))
+                                .spawn();
+                        }
                         let toast_text = match self.settings.language {
                             Language::Es => match &c.matched_rule {
                                 Some(r) => format!("Distracción detectada ({}). ¿Pausa o vuelves?", r),
