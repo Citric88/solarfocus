@@ -236,6 +236,11 @@ impl SessionRepository {
     /// v1.4.0 — number of confirmed distractions whose timestamp
     /// falls inside [start, start + duration_secs]. Used to compute a
     /// per-session "attention score" displayed in the Stats canvas.
+    ///
+    /// v1.4.1 — wrap both sides in SQLite `datetime()` so a UTC
+    /// session timestamp (`…+00:00`) compares correctly against a
+    /// local-TZ distraction timestamp (`…-04:00`). Plain string
+    /// comparison broke ordering when the offsets differed.
     pub fn distractions_in_session_window(
         &self,
         start: &chrono::DateTime<chrono::Utc>,
@@ -245,7 +250,9 @@ impl SessionRepository {
         let count: u32 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM distraction_events WHERE at >= ? AND at <= ?",
+                "SELECT COUNT(*) FROM distraction_events
+                 WHERE datetime(at) >= datetime(?)
+                   AND datetime(at) <= datetime(?)",
                 rusqlite::params![start.to_rfc3339(), end.to_rfc3339()],
                 |r| r.get(0),
             )

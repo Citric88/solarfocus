@@ -176,6 +176,11 @@ pub struct App {
     sessions_today: u8,
     settings_open: bool,
     session_started_at: Option<Instant>,
+    /// v1.4.1 — actual UTC wall-clock session start so the persisted
+    /// `sessions.start_time` reflects when focus *began*, not when the
+    /// row was written (the SessionCompleted handler used to set this
+    /// to Utc::now() at completion, breaking attention-score windows).
+    session_started_at_utc: Option<chrono::DateTime<chrono::Utc>>,
 
     // Phase 2 fields
     focus_rules: FocusRulesEngine,
@@ -458,6 +463,7 @@ impl App {
                 sessions_today,
                 settings_open: false,
                 session_started_at: None,
+                session_started_at_utc: None,
                 focus_rules: FocusRulesEngine::new(),
                 consecutive_distraction_samples: 0,
                 toast: None,
@@ -858,6 +864,7 @@ impl App {
                 self.last_state_was_completed = false;
                 self.last_classification = None;
                 self.session_started_at = Some(std::time::Instant::now());
+                self.session_started_at_utc = Some(chrono::Utc::now());
 
                 if self.settings.ai_enabled {
                     let fut =
@@ -889,6 +896,7 @@ impl App {
                 self.pomodoro_engine.reset();
                 self.last_state_was_completed = false;
                 self.session_started_at = None;
+                self.session_started_at_utc = None;
                 self.toast = Some(Toast {
                     text: match self.settings.language {
                         Language::Es => "Sesión terminada.".to_string(),
@@ -936,9 +944,16 @@ impl App {
                 self.sessions_today = self.sessions_today.saturating_add(1);
                 if let Some(ref repo) = self.session_repo {
                     let duration = self.pomodoro_engine.config().focus_duration;
+                    // v1.4.1 — record the actual session start, not
+                    // the completion timestamp. The old code wrote
+                    // Utc::now() here, which broke attention-score
+                    // window queries.
+                    let start_time = self
+                        .session_started_at_utc
+                        .unwrap_or_else(|| Utc::now() - chrono::Duration::seconds(duration as i64));
                     let record = infra::persistence::SessionRecord {
                         id: None,
-                        start_time: Utc::now(),
+                        start_time,
                         duration,
                         state: "completed".to_string(),
                         category: self.settings.last_category.clone(),
