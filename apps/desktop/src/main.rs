@@ -2584,7 +2584,11 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(680);
 
-        container(body)
+        // v1.4.0 rc3 — wrap Stats body in scrollable so the new
+        // category + distractions panels (below the fold on standard
+        // window heights) are reachable. Same Length::Shrink contract
+        // we used for Setup in v1.3.0-rc5.
+        container(iced::widget::scrollable(body))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {
