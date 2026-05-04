@@ -5,5 +5,7 @@
 //! are kept tight — this module never touches `iced::Element`; UI
 //! lives under `ui::*`.
 
+pub mod builders;
 pub mod helpers;
+pub mod lifecycle;
 pub mod state;
