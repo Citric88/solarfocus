@@ -176,6 +176,11 @@ pub struct App {
     sessions_today: u8,
     settings_open: bool,
     session_started_at: Option<Instant>,
+    /// v1.4.1 — actual UTC wall-clock session start so the persisted
+    /// `sessions.start_time` reflects when focus *began*, not when the
+    /// row was written (the SessionCompleted handler used to set this
+    /// to Utc::now() at completion, breaking attention-score windows).
+    session_started_at_utc: Option<chrono::DateTime<chrono::Utc>>,
 
     // Phase 2 fields
     focus_rules: FocusRulesEngine,
@@ -458,6 +463,7 @@ impl App {
                 sessions_today,
                 settings_open: false,
                 session_started_at: None,
+                session_started_at_utc: None,
                 focus_rules: FocusRulesEngine::new(),
                 consecutive_distraction_samples: 0,
                 toast: None,
@@ -858,6 +864,7 @@ impl App {
                 self.last_state_was_completed = false;
                 self.last_classification = None;
                 self.session_started_at = Some(std::time::Instant::now());
+                self.session_started_at_utc = Some(chrono::Utc::now());
 
                 if self.settings.ai_enabled {
                     let fut =
@@ -889,6 +896,7 @@ impl App {
                 self.pomodoro_engine.reset();
                 self.last_state_was_completed = false;
                 self.session_started_at = None;
+                self.session_started_at_utc = None;
                 self.toast = Some(Toast {
                     text: match self.settings.language {
                         Language::Es => "Sesión terminada.".to_string(),
@@ -936,9 +944,16 @@ impl App {
                 self.sessions_today = self.sessions_today.saturating_add(1);
                 if let Some(ref repo) = self.session_repo {
                     let duration = self.pomodoro_engine.config().focus_duration;
+                    // v1.4.1 — record the actual session start, not
+                    // the completion timestamp. The old code wrote
+                    // Utc::now() here, which broke attention-score
+                    // window queries.
+                    let start_time = self
+                        .session_started_at_utc
+                        .unwrap_or_else(|| Utc::now() - chrono::Duration::seconds(duration as i64));
                     let record = infra::persistence::SessionRecord {
                         id: None,
-                        start_time: Utc::now(),
+                        start_time,
                         duration,
                         state: "completed".to_string(),
                         category: self.settings.last_category.clone(),
@@ -1052,19 +1067,46 @@ impl App {
                                 ))
                                 .spawn();
                         }
-                        let toast_text = match self.settings.language {
-                            Language::Es => match &c.matched_rule {
-                                Some(r) => format!("Distracción detectada ({}). ¿Pausa o vuelves?", r),
-                                None => "Distracción detectada. ¿Pausa o vuelves?".to_string(),
+                        // v1.4.1 — auto-pause the focus session on a
+                        // confirmed window distraction. Live test of
+                        // v1.4.0 surfaced the gap: a notification fired
+                        // and the row was logged, but the timer kept
+                        // counting as if the user was focused. That's
+                        // the same bug we fixed for camera absence in
+                        // v1.3.x; fix it here for window distractions
+                        // too. Auto-pause only when actually focusing.
+                        let auto_paused = matches!(
+                            self.pomodoro_engine.state(),
+                            SolarFocusCore::AppState::Focusing(_)
+                        ) && !self.pomodoro_engine.is_paused();
+                        if auto_paused {
+                            self.pomodoro_engine.pause(0.0);
+                            log::warn!(
+                                "Auto-paused: window distraction confirmed (rule={:?})",
+                                c.matched_rule
+                            );
+                        }
+                        let toast_text = match (self.settings.language, auto_paused) {
+                            (Language::Es, true) => match &c.matched_rule {
+                                Some(r) => format!("Sesión pausada por distracción ({}).", r),
+                                None => "Sesión pausada por distracción.".to_string(),
                             },
-                            Language::En => match &c.matched_rule {
-                                Some(r) => format!("Distraction detected ({}). Pause or refocus?", r),
-                                None => "Distraction detected. Pause or refocus?".to_string(),
+                            (Language::Es, false) => match &c.matched_rule {
+                                Some(r) => format!("Distracción detectada ({}).", r),
+                                None => "Distracción detectada.".to_string(),
+                            },
+                            (Language::En, true) => match &c.matched_rule {
+                                Some(r) => format!("Session paused — distraction ({}).", r),
+                                None => "Session paused — distraction.".to_string(),
+                            },
+                            (Language::En, false) => match &c.matched_rule {
+                                Some(r) => format!("Distraction detected ({}).", r),
+                                None => "Distraction detected.".to_string(),
                             },
                         };
                         tasks.push(Task::done(Message::ShowToast {
                             text: toast_text,
-                            expires_in_secs: 4,
+                            expires_in_secs: 5,
                         }));
                         self.consecutive_distraction_samples = 0;
                     }
@@ -2197,6 +2239,39 @@ impl App {
                 "Checking permission…",
             ),
         };
+        // v1.4.1 — when permission is not Granted, surface the same
+        // "Open System Settings" + "Re-verify" actions that already
+        // exist in the Privacy tab so the user can fix it in one
+        // click without hunting for it. macOS does persist the grant
+        // (no need to re-grant every launch); the most common cause
+        // of seeing "Sin permiso" after a previous Allow is having
+        // not restarted the app after granting in System Settings.
+        let perm_actions: Element<'_, Message> =
+            if !matches!(self.permission_status, PermissionStatus::Granted) {
+                iced::widget::row![
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    chip_local(
+                        match self.settings.language {
+                            Language::Es => "Abrir Ajustes del sistema".to_string(),
+                            Language::En => "Open System Settings".to_string(),
+                        },
+                        false,
+                        Message::OpenSystemSettings,
+                    ),
+                    iced::widget::Space::with_width(SPACE_XS as f32),
+                    chip_local(
+                        match self.settings.language {
+                            Language::Es => "Re-verificar".to_string(),
+                            Language::En => "Re-check".to_string(),
+                        },
+                        false,
+                        Message::ProbePermission,
+                    ),
+                ]
+                .into()
+            } else {
+                iced::widget::Space::with_width(Length::Fixed(0.0)).into()
+            };
         let perm_card: Element<'_, Message> = container(
             iced::widget::row![
                 text("●").size(FONT_LEAD).color(perm_color),
@@ -2208,8 +2283,11 @@ impl App {
                 })
                 .size(FONT_SMALL)
                 .color(TEXT_PRIMARY),
+                iced::widget::horizontal_space(),
+                perm_actions,
             ]
-            .padding(SPACE_SM as u16),
+            .padding(SPACE_SM as u16)
+            .align_y(iced::alignment::Vertical::Center),
         )
         .padding(SPACE_XS as u16)
         .style(|_| container::Style {

@@ -236,6 +236,11 @@ impl SessionRepository {
     /// v1.4.0 — number of confirmed distractions whose timestamp
     /// falls inside [start, start + duration_secs]. Used to compute a
     /// per-session "attention score" displayed in the Stats canvas.
+    ///
+    /// v1.4.1 — wrap both sides in SQLite `datetime()` so a UTC
+    /// session timestamp (`…+00:00`) compares correctly against a
+    /// local-TZ distraction timestamp (`…-04:00`). Plain string
+    /// comparison broke ordering when the offsets differed.
     pub fn distractions_in_session_window(
         &self,
         start: &chrono::DateTime<chrono::Utc>,
@@ -245,7 +250,9 @@ impl SessionRepository {
         let count: u32 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM distraction_events WHERE at >= ? AND at <= ?",
+                "SELECT COUNT(*) FROM distraction_events
+                 WHERE datetime(at) >= datetime(?)
+                   AND datetime(at) <= datetime(?)",
                 rusqlite::params![start.to_rfc3339(), end.to_rfc3339()],
                 |r| r.get(0),
             )
@@ -316,9 +323,12 @@ impl SessionRepository {
     /// Sesiones para una fecha concreta (ISO YYYY-MM-DD). Usado por el
     /// scheduler de resumen diario para procesar el día anterior.
     pub fn sessions_for_date(&self, date: &str) -> SqlResult<Vec<SessionRecord>> {
+        // v1.4.1 — newest first so Stats canvas shows the most recent
+        // session at the top (was ASC; users expect activity-feed
+        // ordering, not chronological).
         let mut stmt = self.conn.prepare(
             "SELECT id, start_time, duration, state, category FROM sessions
-             WHERE date(start_time) = ? ORDER BY start_time ASC",
+             WHERE date(start_time) = ? ORDER BY start_time DESC",
         )?;
         let mut rows = stmt.query(rusqlite::params![date])?;
         let mut records = Vec::new();
