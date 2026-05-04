@@ -88,6 +88,10 @@ pub enum Message {
     DownloadYunet,
     #[cfg(feature = "presence")]
     YunetDownloaded(Result<(), String>),
+    /// Verdict from a background YuNet inference (Present/Absent +
+    /// max face confidence + when it was captured).
+    #[cfg(feature = "presence")]
+    YunetVerdict(Result<(infra::presence::Presence, f32, chrono::DateTime<chrono::Local>), String>),
     // v1.3 Wave C — manual next-deadline input (label + HH:MM today).
     #[cfg(feature = "calendar")]
     SetDeadlineLabel(String),
@@ -253,6 +257,16 @@ pub struct App {
     last_presence: Option<infra::presence::Presence>,
     #[cfg(feature = "presence")]
     presence_error: Option<String>,
+    /// v1.3.1 — last time we kicked off a YuNet inference, used to
+    /// throttle face detection to once every YUNET_THROTTLE_SECS while
+    /// the brightness path keeps polling at 1 Hz.
+    #[cfg(feature = "presence")]
+    last_yunet_at: Option<std::time::Instant>,
+    /// Most recent YuNet verdict + when the frame was captured. Used
+    /// alongside brightness so a stale "face seen" doesn't block an
+    /// auto-pause indefinitely.
+    #[cfg(feature = "presence")]
+    last_yunet: Option<(infra::presence::Presence, chrono::DateTime<chrono::Local>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +496,10 @@ impl App {
                 last_presence: None,
                 #[cfg(feature = "presence")]
                 presence_error: None,
+                #[cfg(feature = "presence")]
+                last_yunet_at: None,
+                #[cfg(feature = "presence")]
+                last_yunet: None,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).
@@ -1315,15 +1333,105 @@ impl App {
             }
             #[cfg(feature = "presence")]
             Message::PresenceProbe => {
-                // Poll synchronously — capture + brightness mean takes
-                // <30 ms on M-series, fast enough for the UI thread at
-                // 1 Hz. Avoids Send bounds on macOS Camera handles.
+                // Capture + brightness on the UI thread (~5 ms total).
+                // YuNet inference is throttled to once every 3 s and
+                // runs on tokio::task::spawn_blocking so it never
+                // blocks the UI even when each call costs ~200 ms on
+                // CPU at 640×640.
+                const YUNET_THROTTLE_SECS: u64 = 3;
                 if let Some(probe) = self.presence_probe.as_ref() {
-                    let result = probe.poll().map_err(|e| e.to_string());
-                    Task::done(Message::PresenceReady(result))
+                    let probe = probe.clone();
+                    match probe.poll() {
+                        Ok((sample, captured)) => {
+                            let captured_at = sample.captured_at;
+                            let immediate = Task::done(Message::PresenceReady(Ok(sample)));
+                            let now = std::time::Instant::now();
+                            let throttle_ok = self
+                                .last_yunet_at
+                                .map(|t| now.duration_since(t).as_secs() >= YUNET_THROTTLE_SECS)
+                                .unwrap_or(true);
+                            if let Some(engine) = probe.yunet_engine() {
+                                if throttle_ok {
+                                    self.last_yunet_at = Some(now);
+                                    let bg = Task::perform(
+                                        async move {
+                                            tokio::task::spawn_blocking(move || {
+                                                let mut g = match engine.lock() {
+                                                    Ok(g) => g,
+                                                    Err(_) => return Err("yunet poisoned".to_string()),
+                                                };
+                                                g.infer(
+                                                    &captured.bytes,
+                                                    captured.width,
+                                                    captured.height,
+                                                )
+                                            })
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                            .and_then(|r| r)
+                                            .map(|(p, c)| (p, c, captured_at))
+                                        },
+                                        Message::YunetVerdict,
+                                    );
+                                    return Task::batch(vec![immediate, bg]);
+                                }
+                            }
+                            immediate
+                        }
+                        Err(e) => Task::done(Message::PresenceReady(Err(e.to_string()))),
+                    }
                 } else {
                     Task::none()
                 }
+            }
+            #[cfg(feature = "presence")]
+            Message::YunetVerdict(result) => {
+                use infra::presence::Presence;
+                match result {
+                    Ok((p, _conf, captured_at)) => {
+                        log::debug!("YuNet verdict: {:?} at {}", p, captured_at);
+                        self.last_yunet = Some((p, captured_at));
+                        // YuNet is the more reliable signal — when it
+                        // disagrees with brightness, prefer YuNet for
+                        // the auto-pause counter.
+                        match p {
+                            Presence::Absent => {
+                                self.consecutive_absent_samples =
+                                    self.consecutive_absent_samples.saturating_add(1);
+                                let threshold = self.settings.presence_absent_threshold.max(1);
+                                if self.consecutive_absent_samples >= threshold
+                                    && matches!(
+                                        self.pomodoro_engine.state(),
+                                        SolarFocusCore::AppState::Focusing(_)
+                                    )
+                                    && !self.pomodoro_engine.is_paused()
+                                {
+                                    self.pomodoro_engine.pause(0.0);
+                                    log::info!(
+                                        "Presence (YuNet): auto-paused after {} Absent samples",
+                                        self.consecutive_absent_samples
+                                    );
+                                    self.toast = Some(Toast {
+                                        text: match self.settings.language {
+                                            Language::Es =>
+                                                "Pausado: te alejaste del escritorio.".to_string(),
+                                            Language::En =>
+                                                "Paused: you stepped away.".to_string(),
+                                        },
+                                        expires_at: Instant::now() + Duration::from_secs(4),
+                                    });
+                                }
+                            }
+                            Presence::Present | Presence::Unknown => {
+                                self.consecutive_absent_samples = 0;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("YuNet inference error (background): {}", e);
+                    }
+                }
+                Task::none()
             }
             // v1.3 Wave C — manual next-deadline input handlers.
             #[cfg(feature = "calendar")]
@@ -1470,11 +1578,23 @@ impl App {
             }
             #[cfg(feature = "presence")]
             Message::PresenceReady(result) => {
-                use infra::presence::Presence;
+                use infra::presence::{DetectionMode, Presence};
                 match result {
                     Ok(sample) => {
                         self.last_presence = Some(sample.presence);
                         self.presence_error = None;
+                        // When YuNet is the active mode, the brightness
+                        // path is informational only — YuNet drives the
+                        // auto-pause counter via Message::YunetVerdict
+                        // because brightness is too noisy to act on.
+                        let yunet_active = self
+                            .presence_probe
+                            .as_ref()
+                            .map(|p| p.mode() == DetectionMode::YunetFace)
+                            .unwrap_or(false);
+                        if yunet_active {
+                            return Task::none();
+                        }
                         match sample.presence {
                             Presence::Absent => {
                                 self.consecutive_absent_samples =

@@ -55,8 +55,12 @@ pub enum PresenceError {
 
 /// Minimum delta in mean luminance (0..=255) between consecutive frames
 /// to interpret as "presence change". Tuned for indoor lighting; a real
-/// face entering or leaving frame typically swings the mean by ≥6 levels.
-const ABSENCE_DELTA: f32 = 8.0;
+/// face entering or leaving frame typically swings the mean by ≥3 levels.
+/// (Was 8.0 in v1.3.0 — empirically too high for "user stepped back".)
+const ABSENCE_DELTA: f32 = 3.0;
+/// Minimum frame variance (luminance std-dev squared, normalized) for
+/// "face likely in frame". Below this, we're looking at a flat scene.
+const VARIANCE_PRESENT_MIN: f32 = 200.0;
 
 /// YuNet face confidence threshold — detections below this are dropped.
 const FACE_CONF_MIN: f32 = 0.6;
@@ -77,16 +81,94 @@ pub enum DetectionMode {
 pub struct PresenceProbe {
     camera: Mutex<Camera>,
     last_mean: Mutex<Option<f32>>,
-    yunet: Mutex<Option<YunetSession>>,
+    /// YuNet engine in Arc<Mutex<>> so we can `clone()` the Arc and
+    /// hand it to a tokio::spawn_blocking task without holding the
+    /// UI thread for the ~200 ms inference call.
+    yunet: Option<std::sync::Arc<std::sync::Mutex<YunetEngine>>>,
     mode: DetectionMode,
 }
 
-/// Encapsulates the ort session + input shape for YuNet. Wrapped in
-/// Mutex on the parent so the synchronous `poll()` path can mutate it.
-struct YunetSession {
+/// Send-safe wrapper around the ort YuNet session. Held in
+/// `Arc<Mutex<...>>` on `PresenceProbe` so we can clone the Arc and
+/// move it into `spawn_blocking` without the UI thread blocking on
+/// CPU inference (~200 ms per call at 640×640 on M-series).
+pub struct YunetEngine {
     session: ort::session::Session,
     input_w: u32,
     input_h: u32,
+    /// Actual input tensor name from the loaded model (varies between
+    /// YuNet revisions: "input", "data", "image").
+    input_name: String,
+}
+
+// SAFETY: ort::Session is documented as thread-safe (a single Session
+// can be invoked from multiple threads concurrently). We additionally
+// guard mutations behind a Mutex on the parent.
+unsafe impl Send for YunetEngine {}
+unsafe impl Sync for YunetEngine {}
+
+impl YunetEngine {
+    /// Run face detection on a captured frame. Returns Present + max
+    /// face confidence on success, or an error description on failure.
+    /// Designed to run on a tokio::task::spawn_blocking thread.
+    pub fn infer(&mut self, gray: &[u8], src_w: u32, src_h: u32) -> Result<(Presence, f32), String> {
+        use ndarray::Array4;
+        let (w, h) = (self.input_w as usize, self.input_h as usize);
+
+        // Cheap nearest-neighbor resize gray → 640×640, replicate into
+        // BGR so YuNet (trained on BGR) sees consistent channels.
+        let mut bgr = vec![0f32; w * h * 3];
+        for ty in 0..h {
+            let sy = (ty as u32 * src_h / h as u32).min(src_h.saturating_sub(1));
+            for tx in 0..w {
+                let sx = (tx as u32 * src_w / w as u32).min(src_w.saturating_sub(1));
+                let g = gray[(sy * src_w + sx) as usize] as f32;
+                let idx = (ty * w + tx) * 3;
+                bgr[idx] = g;
+                bgr[idx + 1] = g;
+                bgr[idx + 2] = g;
+            }
+        }
+        let mut tensor = Array4::<f32>::zeros((1, 3, h, w));
+        for c in 0..3 {
+            for y in 0..h {
+                for x in 0..w {
+                    tensor[(0, c, y, x)] = bgr[(y * w + x) * 3 + c];
+                }
+            }
+        }
+        let input_value = ort::value::Value::from_array(tensor)
+            .map_err(|e| e.to_string())?;
+        let input_name = self.input_name.clone();
+        let outputs = self
+            .session
+            .run(ort::inputs![input_name.as_str() => input_value])
+            .map_err(|e| e.to_string())?;
+        let mut max_score = 0f32;
+        for (_, val) in outputs.iter() {
+            if let Ok((_, slice)) = val.try_extract_tensor::<f32>() {
+                for &v in slice.iter() {
+                    if v.is_finite() && v > max_score {
+                        max_score = v;
+                    }
+                }
+            }
+        }
+        let presence = if max_score >= FACE_CONF_MIN {
+            Presence::Present
+        } else {
+            Presence::Absent
+        };
+        Ok((presence, max_score.clamp(0.0, 1.0)))
+    }
+}
+
+/// Captured frame bytes + dims handed off from `poll()` to a background
+/// YuNet inference task.
+pub struct CapturedFrame {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl PresenceProbe {
@@ -111,7 +193,7 @@ impl PresenceProbe {
         let (yunet, mode) = match Self::try_load_yunet() {
             Ok(Some(s)) => {
                 log::info!("PresenceProbe: YuNet ONNX loaded ({}x{})", s.input_w, s.input_h);
-                (Some(s), DetectionMode::YunetFace)
+                (Some(std::sync::Arc::new(std::sync::Mutex::new(s))), DetectionMode::YunetFace)
             }
             Ok(None) => {
                 log::info!("PresenceProbe: YuNet model absent — using brightness heuristic");
@@ -126,7 +208,7 @@ impl PresenceProbe {
         Ok(Self {
             camera: Mutex::new(camera),
             last_mean: Mutex::new(None),
-            yunet: Mutex::new(yunet),
+            yunet,
             mode,
         })
     }
@@ -135,7 +217,14 @@ impl PresenceProbe {
         self.mode
     }
 
-    fn try_load_yunet() -> Result<Option<YunetSession>, String> {
+    /// Clone of the YuNet engine handle. Returned to the App so it
+    /// can ferry the Arc into a `tokio::task::spawn_blocking` call
+    /// without holding the UI thread.
+    pub fn yunet_engine(&self) -> Option<std::sync::Arc<std::sync::Mutex<YunetEngine>>> {
+        self.yunet.clone()
+    }
+
+    fn try_load_yunet() -> Result<Option<YunetEngine>, String> {
         let path = Self::yunet_path();
         if !path.exists() {
             return Ok(None);
@@ -144,18 +233,34 @@ impl PresenceProbe {
             .map_err(|e| e.to_string())?
             .commit_from_file(&path)
             .map_err(|e| e.to_string())?;
-        // YuNet 2023mar is fixed at 320x320 by default; can be reshaped
-        // but we keep the canonical input.
-        Ok(Some(YunetSession {
+        let inputs = session.inputs();
+        for inp in inputs.iter() {
+            log::info!(
+                "PresenceProbe: YuNet input name='{}' dtype={:?}",
+                inp.name(),
+                inp.dtype()
+            );
+        }
+        let input_name = inputs
+            .first()
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| "input".to_string());
+        let _ = inputs;
+        // The 2023-mar export ships with declared input shape
+        // [1, 3, 640, 640].
+        Ok(Some(YunetEngine {
             session,
-            input_w: 320,
-            input_h: 320,
+            input_w: 640,
+            input_h: 640,
+            input_name,
         }))
     }
 
-    /// Capture one frame and return a presence sample. The frame buffer
-    /// is dropped before this function returns — never persisted.
-    pub fn poll(&self) -> Result<PresenceSample, PresenceError> {
+    /// Capture one frame and return a brightness-based presence
+    /// sample plus the raw bytes so the App can optionally fire off
+    /// a background YuNet inference on a `spawn_blocking` thread.
+    /// The frame buffer is dropped before this function returns.
+    pub fn poll(&self) -> Result<(PresenceSample, CapturedFrame), PresenceError> {
         let mut cam = self.camera.lock().expect("camera mutex poisoned");
         let frame = cam
             .frame()
@@ -164,126 +269,55 @@ impl PresenceProbe {
             .decode_image::<LumaFormat>()
             .map_err(|e| PresenceError::Read(e.to_string()))?;
 
-        // YuNet expects RGB at 320x320. The brightness-only path needs
-        // just the mean luminance. Compute mean for both paths because
-        // it's cheap, then either run YuNet on a resized RGB tensor or
-        // fall back to the heuristic.
         let raw = buf.as_raw();
         let total: u64 = raw.iter().map(|&p| p as u64).sum();
         let count = raw.len() as u64;
         let mean = if count == 0 { 0.0 } else { total as f32 / count as f32 };
+        let variance: f32 = if count > 0 {
+            let mut accum = 0f64;
+            for &p in raw {
+                let d = p as f32 - mean;
+                accum += (d * d) as f64;
+            }
+            (accum / count as f64) as f32
+        } else {
+            0.0
+        };
         let cap_w = buf.width();
         let cap_h = buf.height();
-        // Move the raw bytes out before we drop the frame, so the YuNet
-        // path can resize without relying on the frame's lifetime.
         let raw_bytes = raw.to_vec();
         drop(buf);
         drop(frame);
 
         let captured_at = Local::now();
-        if self.mode == DetectionMode::YunetFace {
-            // Try YuNet; if it errors at runtime we fall back to
-            // brightness for *this* sample but stay in YunetFace mode.
-            match self.run_yunet(&raw_bytes, cap_w, cap_h) {
-                Ok((presence, confidence)) => {
-                    return Ok(PresenceSample {
-                        presence,
-                        confidence,
-                        captured_at,
-                    });
-                }
-                Err(e) => {
-                    log::warn!("PresenceProbe: YuNet inference error ({}), brightness fallback", e);
-                }
-            }
-        }
-
-        // Brightness fallback path.
         let mut last = self.last_mean.lock().expect("last_mean mutex poisoned");
         let (presence, confidence) = match *last {
             None => (Presence::Unknown, 0.0),
             Some(prev) => {
                 let delta = (mean - prev).abs();
                 if delta >= ABSENCE_DELTA {
-                    (Presence::Absent, (delta / 32.0).clamp(0.0, 1.0))
+                    (Presence::Absent, (delta / 32.0).clamp(0.3, 1.0))
+                } else if variance < VARIANCE_PRESENT_MIN {
+                    let conf = ((VARIANCE_PRESENT_MIN - variance) / VARIANCE_PRESENT_MIN)
+                        .clamp(0.3, 0.9);
+                    (Presence::Absent, conf)
                 } else {
-                    (Presence::Present, 1.0 - (delta / ABSENCE_DELTA))
+                    let conf = (variance / 1500.0).clamp(0.5, 1.0);
+                    (Presence::Present, conf)
                 }
             }
         };
         *last = Some(mean);
 
-        Ok(PresenceSample { presence, confidence, captured_at })
-    }
+        log::debug!(
+            "PresenceProbe: brightness path mean={:.1} var={:.0} → {:?}",
+            mean, variance, presence
+        );
 
-    /// Resize a grayscale frame to 320×320, repeat to 3 channels (BGR
-    /// since YuNet was trained on BGR input), normalize to f32, run
-    /// inference, return Present/Absent + max-face confidence.
-    fn run_yunet(&self, gray: &[u8], src_w: u32, src_h: u32) -> Result<(Presence, f32), String> {
-        use ndarray::{Array4, Axis};
-        let mut guard = self.yunet.lock().map_err(|_| "yunet poisoned".to_string())?;
-        let yunet = guard
-            .as_mut()
-            .ok_or_else(|| "yunet session missing".to_string())?;
-        let (w, h) = (yunet.input_w as usize, yunet.input_h as usize);
-
-        // Cheap nearest-neighbor resize so we don't pull in a full image
-        // pipeline; YuNet tolerates this at 1 fps.
-        let mut bgr = vec![0f32; w * h * 3];
-        for ty in 0..h {
-            let sy = (ty as u32 * src_h / w as u32).min(src_h.saturating_sub(1));
-            for tx in 0..w {
-                let sx = (tx as u32 * src_w / w as u32).min(src_w.saturating_sub(1));
-                let g = gray[(sy * src_w + sx) as usize] as f32;
-                let idx = (ty * w + tx) * 3;
-                // Replicate luminance into B, G, R.
-                bgr[idx] = g;
-                bgr[idx + 1] = g;
-                bgr[idx + 2] = g;
-            }
-        }
-
-        // ONNX expects NCHW [1, 3, H, W].
-        let mut tensor = Array4::<f32>::zeros((1, 3, h, w));
-        for c in 0..3 {
-            for y in 0..h {
-                for x in 0..w {
-                    tensor[(0, c, y, x)] = bgr[(y * w + x) * 3 + c];
-                }
-            }
-        }
-        let _ = Axis(0);
-
-        // Build input value and run. YuNet's input is named "input"
-        // in the 2023-mar revision.
-        let input_value = ort::value::Value::from_array(tensor)
-            .map_err(|e| e.to_string())?;
-        let outputs = yunet
-            .session
-            .run(ort::inputs!["input" => input_value])
-            .map_err(|e| e.to_string())?;
-
-        // YuNet's "main" output is the per-anchor confidence at index 0
-        // (cls), or sometimes index 1 depending on revision. We only
-        // need a "max face score" — scan all f32 outputs to find the
-        // largest value as a robust proxy.
-        let mut max_score = 0f32;
-        for (_, val) in outputs.iter() {
-            if let Ok((_, slice)) = val.try_extract_tensor::<f32>() {
-                for &v in slice.iter() {
-                    if v.is_finite() && v > max_score {
-                        max_score = v;
-                    }
-                }
-            }
-        }
-
-        let presence = if max_score >= FACE_CONF_MIN {
-            Presence::Present
-        } else {
-            Presence::Absent
-        };
-        Ok((presence, max_score.clamp(0.0, 1.0)))
+        Ok((
+            PresenceSample { presence, confidence, captured_at },
+            CapturedFrame { bytes: raw_bytes, width: cap_w, height: cap_h },
+        ))
     }
 }
 
