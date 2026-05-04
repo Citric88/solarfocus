@@ -90,6 +90,15 @@ pub enum Message {
     SetDeadlineTime(String),
     #[cfg(feature = "calendar")]
     ClearDeadline,
+    // v1.3.1 — live EventKit binding (toggle + access result + refresh).
+    #[cfg(feature = "calendar")]
+    ToggleCalendarLive(bool),
+    #[cfg(feature = "calendar")]
+    CalendarAccessResult(Result<bool, String>),
+    #[cfg(feature = "calendar")]
+    CalendarRefresh,
+    #[cfg(feature = "calendar")]
+    CalendarEventsLoaded(Result<Vec<infra::calendar::CalendarEvent>, String>),
     ThumbsUp,
     ThumbsDown,
 
@@ -220,6 +229,13 @@ pub struct App {
     // v1.3 Wave C — ephemeral input buffer for HH:MM today.
     #[cfg(feature = "calendar")]
     deadline_time_str: String,
+    // v1.3.1 — live EventKit reader (created lazily on first toggle).
+    #[cfg(feature = "calendar")]
+    calendar_reader: Option<std::sync::Arc<infra::calendar::ek::CalendarReader>>,
+    #[cfg(feature = "calendar")]
+    calendar_events: Vec<infra::calendar::CalendarEvent>,
+    #[cfg(feature = "calendar")]
+    calendar_error: Option<String>,
 
     // v1.3 Wave B — camera presence probe (lazy init on first toggle).
     // Wrapped in Arc<Mutex<>> because PresenceProbe is Send+Sync but
@@ -447,6 +463,12 @@ impl App {
                 custom_category_str,
                 #[cfg(feature = "calendar")]
                 deadline_time_str: initial_deadline_str,
+                #[cfg(feature = "calendar")]
+                calendar_reader: None,
+                #[cfg(feature = "calendar")]
+                calendar_events: Vec::new(),
+                #[cfg(feature = "calendar")]
+                calendar_error: None,
                 #[cfg(feature = "presence")]
                 presence_probe: None,
                 #[cfg(feature = "presence")]
@@ -463,6 +485,12 @@ impl App {
                 let mut tasks = vec![Task::done(Message::ProbePermission)];
                 if should_attempt_llm_load(&Settings::load()) {
                     tasks.push(Task::done(Message::SpawnEngineLoad));
+                }
+                // v1.3.1 — if the user previously enabled live calendar
+                // and granted permission, kick off an initial refresh.
+                #[cfg(feature = "calendar")]
+                if Settings::load().calendar_live_enabled {
+                    tasks.push(Task::done(Message::ToggleCalendarLive(true)));
                 }
                 Task::batch(tasks)
             },
@@ -738,6 +766,14 @@ impl App {
         {
             subs.push(
                 iced::time::every(Duration::from_secs(1)).map(|_| Message::PresenceProbe),
+            );
+        }
+
+        // v1.3.1 — calendar refresh once per minute while live mode is on.
+        #[cfg(feature = "calendar")]
+        if self.settings.calendar_live_enabled && self.calendar_reader.is_some() {
+            subs.push(
+                iced::time::every(Duration::from_secs(60)).map(|_| Message::CalendarRefresh),
             );
         }
 
@@ -1321,6 +1357,79 @@ impl App {
                 self.settings.next_deadline_label.clear();
                 self.deadline_time_str.clear();
                 self.settings.save();
+                Task::none()
+            }
+            // v1.3.1 — live EventKit toggle. macOS Calendar permission
+            // prompt is synchronous via EventKit's barrier-based wait;
+            // the first call typically returns within ~100 ms (or
+            // longer if the user is reading the prompt). Run on UI
+            // thread to avoid Send bounds on Retained<EKEventStore>.
+            #[cfg(feature = "calendar")]
+            Message::ToggleCalendarLive(on) => {
+                self.settings.calendar_live_enabled = on;
+                self.settings.save();
+                self.calendar_error = None;
+                if on {
+                    if self.calendar_reader.is_none() {
+                        self.calendar_reader = Some(std::sync::Arc::new(
+                            infra::calendar::ek::CalendarReader::new(),
+                        ));
+                    }
+                    let reader = self.calendar_reader.as_ref().unwrap().clone();
+                    let result = reader.request_access().map_err(|e| e.to_string());
+                    Task::done(Message::CalendarAccessResult(result))
+                } else {
+                    self.calendar_events.clear();
+                    Task::none()
+                }
+            }
+            #[cfg(feature = "calendar")]
+            Message::CalendarAccessResult(result) => match result {
+                Ok(true) => {
+                    log::info!("Calendar: access granted");
+                    Task::done(Message::CalendarRefresh)
+                }
+                Ok(false) => {
+                    log::info!("Calendar: access denied");
+                    self.settings.calendar_live_enabled = false;
+                    self.settings.save();
+                    self.calendar_error = Some(match self.settings.language {
+                        Language::Es => "Permiso de calendario denegado.".into(),
+                        Language::En => "Calendar permission denied.".into(),
+                    });
+                    Task::none()
+                }
+                Err(e) => {
+                    log::warn!("Calendar: access error: {}", e);
+                    self.calendar_error = Some(e);
+                    self.settings.calendar_live_enabled = false;
+                    self.settings.save();
+                    Task::none()
+                }
+            },
+            #[cfg(feature = "calendar")]
+            Message::CalendarRefresh => {
+                use infra::calendar::CalendarSource;
+                if let Some(reader) = self.calendar_reader.as_ref() {
+                    let result = reader.events_today().map_err(|e| e.to_string());
+                    Task::done(Message::CalendarEventsLoaded(result))
+                } else {
+                    Task::none()
+                }
+            }
+            #[cfg(feature = "calendar")]
+            Message::CalendarEventsLoaded(result) => {
+                match result {
+                    Ok(events) => {
+                        log::info!("Calendar: {} events loaded today", events.len());
+                        self.calendar_events = events;
+                        self.calendar_error = None;
+                    }
+                    Err(e) => {
+                        log::warn!("Calendar: load error: {}", e);
+                        self.calendar_error = Some(e);
+                    }
+                }
                 Task::none()
             }
             #[cfg(feature = "presence")]
@@ -2808,56 +2917,78 @@ impl App {
         use ui::palette::*;
         #[cfg(feature = "calendar")]
         {
-            if let Some(s) = self.settings.next_deadline_at.as_deref() {
-                if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) {
-                    let when = parsed.with_timezone(&chrono::Local);
-                    let now = chrono::Local::now();
-                    let delta = when - now;
-                    if delta.num_seconds() > 0 {
-                        let mins = delta.num_minutes();
-                        let h = mins / 60;
-                        let m = mins % 60;
-                        let label = if !self.settings.next_deadline_label.is_empty() {
-                            format!(
-                                "{} \"{}\" {} {}h{:02}m",
-                                match self.settings.language {
-                                    Language::Es => "Próximo:",
-                                    Language::En => "Next:",
-                                },
-                                self.settings.next_deadline_label,
-                                match self.settings.language {
-                                    Language::Es => "en",
-                                    Language::En => "in",
-                                },
-                                h,
-                                m,
+            // v1.3.1 — prefer the live EventKit next-event over the
+            // manual deadline if both are present.
+            let now = chrono::Local::now();
+            let live_next: Option<(String, chrono::DateTime<chrono::Local>)> =
+                infra::calendar::next_event(&self.calendar_events, now)
+                    .map(|e| (e.title.clone(), e.start));
+            let manual_next: Option<(String, chrono::DateTime<chrono::Local>)> =
+                self.settings.next_deadline_at.as_deref().and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .map(|d| {
+                            (
+                                self.settings.next_deadline_label.clone(),
+                                d.with_timezone(&chrono::Local),
                             )
-                        } else {
-                            format!(
-                                "{} {}h{:02}m",
-                                match self.settings.language {
-                                    Language::Es => "Próxima reunión en",
-                                    Language::En => "Next meeting in",
-                                },
-                                h,
-                                m,
-                            )
-                        };
-                        return container(
-                            text(label).size(FONT_SMALL).color(TEXT_SECONDARY),
-                        )
-                        .padding([4, 12])
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(SURFACE_RAISED)),
-                            border: iced::Border {
-                                radius: 6.0.into(),
-                                width: 1.0,
-                                color: ACCENT_DIM,
-                            },
-                            ..Default::default()
                         })
-                        .into();
-                    }
+                });
+            // Pick whichever is nearer in the future.
+            let candidate = match (live_next, manual_next) {
+                (Some(a), Some(b)) => {
+                    if a.1 <= b.1 { Some(a) } else { Some(b) }
+                }
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            if let Some((label, when)) = candidate {
+                let delta = when - now;
+                if delta.num_seconds() > 0 {
+                    let mins = delta.num_minutes();
+                    let h = mins / 60;
+                    let m = mins % 60;
+                    let pretty = if !label.is_empty() {
+                        format!(
+                            "{} \"{}\" {} {}h{:02}m",
+                            match self.settings.language {
+                                Language::Es => "Próximo:",
+                                Language::En => "Next:",
+                            },
+                            label,
+                            match self.settings.language {
+                                Language::Es => "en",
+                                Language::En => "in",
+                            },
+                            h,
+                            m,
+                        )
+                    } else {
+                        format!(
+                            "{} {}h{:02}m",
+                            match self.settings.language {
+                                Language::Es => "Próxima reunión en",
+                                Language::En => "Next meeting in",
+                            },
+                            h,
+                            m,
+                        )
+                    };
+                    return container(
+                        text(pretty).size(FONT_SMALL).color(TEXT_SECONDARY),
+                    )
+                    .padding([4, 12])
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(SURFACE_RAISED)),
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            width: 1.0,
+                            color: ACCENT_DIM,
+                        },
+                        ..Default::default()
+                    })
+                    .into();
                 }
             }
         }
@@ -3246,10 +3377,66 @@ impl App {
             ..Default::default()
         });
 
-        // v1.3 Wave C — manual deadline card. Lets the user type a
-        // label + HH:MM today; the timer canvas surfaces a badge with
-        // "X in Yh Zm" until the deadline passes. v1.3.1 will replace
-        // this with live EventKit data.
+        // v1.3 Wave C — calendar card combining the v1.3.1 live
+        // EventKit toggle with the manual fallback for users who
+        // decline calendar permission.
+        #[cfg(feature = "calendar")]
+        let live_toggle_row: Element<'_, Message> = iced::widget::row![
+            text(if self.settings.calendar_live_enabled {
+                match self.settings.language {
+                    Language::Es => "Lectura de Calendar (iCloud / Google / Local): activa",
+                    Language::En => "Calendar (iCloud / Google / Local) live: enabled",
+                }
+            } else {
+                match self.settings.language {
+                    Language::Es => "Lectura de Calendar (iCloud / Google / Local): desactivada",
+                    Language::En => "Calendar (iCloud / Google / Local) live: disabled",
+                }
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_PRIMARY),
+            iced::widget::horizontal_space(),
+            chip_local(
+                if self.settings.calendar_live_enabled {
+                    match self.settings.language {
+                        Language::Es => "Desactivar".to_string(),
+                        Language::En => "Disable".to_string(),
+                    }
+                } else {
+                    match self.settings.language {
+                        Language::Es => "Activar".to_string(),
+                        Language::En => "Enable".to_string(),
+                    }
+                },
+                false,
+                Message::ToggleCalendarLive(!self.settings.calendar_live_enabled),
+            ),
+        ]
+        .into();
+
+        #[cfg(feature = "calendar")]
+        let calendar_status: Element<'_, Message> = if let Some(err) = &self.calendar_error {
+            text(err.clone()).size(FONT_TINY).color(DANGER).into()
+        } else if self.settings.calendar_live_enabled {
+            text(format!(
+                "{} {} {}",
+                match self.settings.language {
+                    Language::Es => "Eventos de hoy:",
+                    Language::En => "Today's events:",
+                },
+                self.calendar_events.len(),
+                match self.settings.language {
+                    Language::Es => if self.calendar_events.len() == 1 { "evento" } else { "eventos" },
+                    Language::En => if self.calendar_events.len() == 1 { "event" } else { "events" },
+                },
+            ))
+            .size(FONT_TINY)
+            .color(TEXT_MUTED)
+            .into()
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         #[cfg(feature = "calendar")]
         let deadline_card: Element<'_, Message> = container(
             column![
@@ -3258,6 +3445,14 @@ impl App {
                     Language::En => "Next meeting / deadline",
                 })
                 .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                live_toggle_row,
+                calendar_status,
+                text(match self.settings.language {
+                    Language::Es => "O introduce un deadline manual (se usa si el calendario está desactivado o no hay eventos):",
+                    Language::En => "Or enter a manual deadline (used when live calendar is off or empty):",
+                })
+                .size(FONT_TINY)
                 .color(TEXT_MUTED),
                 iced::widget::row![
                     iced::widget::text_input(
@@ -3287,12 +3482,6 @@ impl App {
                         Message::ClearDeadline,
                     ),
                 ],
-                text(match self.settings.language {
-                    Language::Es => "v1.3.0: entrada manual. v1.3.1 leerá tu Calendar (iCloud, Google, Exchange) automáticamente.",
-                    Language::En => "v1.3.0: manual entry. v1.3.1 will read your Calendar (iCloud, Google, Exchange) automatically.",
-                })
-                .size(FONT_TINY)
-                .color(TEXT_MUTED),
             ]
             .spacing(SPACE_SM as u16),
         )
