@@ -3186,8 +3186,17 @@ impl App {
         // Single context-aware CTA below the ring.
         let cta = self.cta_button(is_paused);
 
-        // Microcopy or toast (toast wins).
-        let microcopy: Element<'_, Message> = if let Some(t) = &self.toast {
+        // Microcopy or toast (toast wins). v1.4.0 rc8 — guard against
+        // an empty / whitespace-only toast text that would render as a
+        // bare yellow bar (saw this on boot when the LLM hot-swap fired
+        // before the loading toast had a chance to paint).
+        let toast_visible = self
+            .toast
+            .as_ref()
+            .map(|t| !t.text.trim().is_empty())
+            .unwrap_or(false);
+        let microcopy: Element<'_, Message> = if toast_visible {
+            let t = self.toast.as_ref().unwrap();
             container(
                 iced::widget::row![
                     text(t.text.clone()).size(FONT_BODY).color(BG),
