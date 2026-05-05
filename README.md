@@ -180,5 +180,5 @@ Apache-2.0 OR MIT, a elección del usuario.
 ---
 
 <div align="center">
-<sub>Construido con cuidado por Gabriel Ordoñez · 2026</sub>
+<sub>Build by Citric88 · 2026</sub>
 </div>
