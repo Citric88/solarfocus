@@ -61,12 +61,26 @@ pub fn should_attempt_llm_load(settings: &Settings) -> bool {
 }
 
 pub fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
+    build_classifier_with_plugins(settings, &[])
+}
+
+/// v1.12.0 — same as `build_classifier` but additionally folds enabled
+/// plugin classifier_rules into the underlying RulesClassifier when the
+/// active mode is Rules (or the DistilBERT fallback to Rules).
+pub fn build_classifier_with_plugins(
+    settings: &Settings,
+    plugins: &[crate::infra::plugins::Plugin],
+) -> Arc<dyn DistractionClassifier> {
+    let make_rules_with_plugins = || -> RulesClassifier {
+        let path = settings.effective_rules_path();
+        let mut rc = RulesClassifier::bundled_with_user_override(&path);
+        crate::infra::plugins::merge_into_classifier(&mut rc, plugins);
+        rc
+    };
+
     match settings.classifier_mode {
         ClassifierMode::Mock => Arc::new(MockClassifier),
-        ClassifierMode::Rules => {
-            let path = settings.effective_rules_path();
-            Arc::new(RulesClassifier::bundled_with_user_override(&path))
-        }
+        ClassifierMode::Rules => Arc::new(make_rules_with_plugins()),
         ClassifierMode::Distilbert => {
             #[cfg(feature = "classifier")]
             {
@@ -84,8 +98,7 @@ pub fn build_classifier(settings: &Settings) -> Arc<dyn DistractionClassifier> {
                     "ClassifierMode::Distilbert requested but binary built without `classifier` feature — falling back to rules"
                 );
             }
-            let path = settings.effective_rules_path();
-            Arc::new(RulesClassifier::bundled_with_user_override(&path))
+            Arc::new(make_rules_with_plugins())
         }
     }
 }

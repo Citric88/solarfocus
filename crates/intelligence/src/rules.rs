@@ -100,7 +100,9 @@ impl RulesClassifier {
         })
     }
 
-    fn merge(&mut self, other: Self) {
+    /// v1.12.0 — public so the plugin loader can chain plugin-supplied
+    /// rules on top of bundled + user defaults.
+    pub fn merge(&mut self, other: Self) {
         self.focus_processes.extend(other.focus_processes);
         self.focus_title_keywords.extend(other.focus_title_keywords);
         self.distraction_processes.extend(other.distraction_processes);

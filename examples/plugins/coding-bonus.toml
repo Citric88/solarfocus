@@ -1,0 +1,19 @@
+# SolarFocus OS plugin example — extra seeds for coding sessions.
+#
+# Awards bonus seeds when SessionCompleted fires with a matching
+# category, in addition to the v1.9.0 base/attention/streak seeds.
+# Stacks with other enabled plugins.
+
+[metadata]
+name = "Coding bonus"
+version = "0.1.0"
+author = "Gabriel"
+description = "Reward focused coding + writing sessions with extra seeds."
+
+# Map of category name (exact match against settings.last_category) to
+# extra seeds awarded per *valid* session in that category. Invalid
+# sessions earn nothing — same gate as the base reward.
+[seed_rules.category_bonus]
+Coding = 2
+Writing = 1
+"Deep work" = 1

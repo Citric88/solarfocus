@@ -158,6 +158,13 @@ pub struct Settings {
     // Off by default; the user opts in from Setup → General.
     #[serde(default)]
     pub deep_mode_enabled: bool,
+
+    // v1.12.0 — per-plugin enable/disable overrides keyed by plugin id
+    // (i.e. the .toml filename sans extension). Missing entries default
+    // to enabled — once a plugin is dropped into the plugins folder it
+    // works opt-out, not opt-in.
+    #[serde(default)]
+    pub plugin_overrides: std::collections::HashMap<String, bool>,
 }
 
 fn default_min_attention() -> u8 {
@@ -230,6 +237,7 @@ impl Default for Settings {
             calendar_live_enabled: false,
             min_attention_for_valid_session: default_min_attention(),
             deep_mode_enabled: false,
+            plugin_overrides: std::collections::HashMap::new(),
         }
     }
 }

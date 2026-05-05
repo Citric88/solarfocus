@@ -178,6 +178,20 @@ impl App {
                             let _ = repo.save_seeds("streak_bonus", 1, saved_id);
                             self.seeds_awarded_last += 1;
                         }
+                        // v1.12.0 — plugin category bonus. Sums across
+                        // every enabled plugin that names this category.
+                        let plugin_bonus = crate::infra::plugins::seed_bonus_for_category(
+                            &self.plugins,
+                            &self.settings.last_category,
+                        );
+                        if plugin_bonus > 0 {
+                            let _ = repo.save_seeds(
+                                "plugin_bonus",
+                                plugin_bonus,
+                                saved_id,
+                            );
+                            self.seeds_awarded_last += plugin_bonus;
+                        }
                         // Refresh cached totals for hot UI reads.
                         self.seeds_total_cache = repo.total_seeds().unwrap_or(0);
                     } else {
@@ -1545,6 +1559,41 @@ impl App {
                 let clamped = value.min(100);
                 self.settings.min_attention_for_valid_session = clamped;
                 self.settings.save();
+                Task::none()
+            }
+
+            Message::TogglePlugin(id, enabled) => {
+                self.settings
+                    .plugin_overrides
+                    .insert(id.clone(), enabled);
+                self.settings.save();
+                if let Some(p) = self.plugins.iter_mut().find(|p| p.id == id) {
+                    p.enabled = enabled;
+                }
+                // Rebuild classifier so the rules table reflects the
+                // change immediately (no app restart needed).
+                self.classifier = crate::app::builders::build_classifier_with_plugins(
+                    &self.settings,
+                    &self.plugins,
+                );
+                Task::none()
+            }
+
+            Message::ReloadPlugins => {
+                self.plugins =
+                    crate::infra::plugins::scan(&self.settings.plugin_overrides);
+                self.classifier = crate::app::builders::build_classifier_with_plugins(
+                    &self.settings,
+                    &self.plugins,
+                );
+                let count = self.plugins.len();
+                self.toast = Some(Toast {
+                    text: match self.settings.language {
+                        Language::Es => format!("🧩 {count} plugin(s) recargados."),
+                        Language::En => format!("🧩 {count} plugin(s) reloaded."),
+                    },
+                    expires_at: Instant::now() + Duration::from_secs(4),
+                });
                 Task::none()
             }
 

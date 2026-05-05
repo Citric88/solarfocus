@@ -27,6 +27,7 @@ pub enum SetupTab {
     General,
     Ai,
     Privacy,
+    Plugins,
     About,
 }
 impl Default for SetupTab {
@@ -114,6 +115,10 @@ pub struct App {
     // `_last` field lets the toast announce *this* session's award.
     pub(crate) seeds_total_cache: u32,
     pub(crate) seeds_awarded_last: u32,
+
+    // v1.12.0 — loaded plugins (Vec, oldest first). Each carries its
+    // enable flag; a single Reload action rescans the dir.
+    pub(crate) plugins: Vec<crate::infra::plugins::Plugin>,
 
     pub(crate) permission_status: PermissionStatus,
 
