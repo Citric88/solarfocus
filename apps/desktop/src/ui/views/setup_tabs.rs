@@ -79,7 +79,13 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(720);
 
-        container(iced::widget::scrollable(body))
+        // v1.12.2 — center horizontally so wide windows don't leave dead
+        // space to the right.
+        let centered = container(body)
+            .width(Length::Fill)
+            .center_x(Length::Fill);
+
+        container(iced::widget::scrollable(centered))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {

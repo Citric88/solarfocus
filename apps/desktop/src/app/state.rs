@@ -116,6 +116,13 @@ pub struct App {
     pub(crate) seeds_total_cache: u32,
     pub(crate) seeds_awarded_last: u32,
 
+    // v1.12.2 — last export path. Surfaced inline on the Privacy card
+    // because the toast only renders on the Focus canvas, so users
+    // exporting from Privacy never saw confirmation that the file was
+    // actually written.
+    pub(crate) last_export_path: Option<std::path::PathBuf>,
+    pub(crate) last_export_error: Option<String>,
+
     // v1.12.0 — loaded plugins (Vec, oldest first). Each carries its
     // enable flag; a single Reload action rescans the dir.
     pub(crate) plugins: Vec<crate::infra::plugins::Plugin>,

@@ -486,6 +486,182 @@ impl SessionRepository {
         Ok(records)
     }
 
+    // -------- v1.12.2 dashboard analytics --------
+
+    /// Average attention score across all completed sessions for the
+    /// last `days` days. Computed in Rust (one query per session is
+    /// cheap; the alternative is a complex SQL with a per-session
+    /// distraction COUNT which is fine but harder to test).
+    /// Returns `None` when there are zero completed sessions in the window.
+    pub fn average_attention_last_days(&self, days: u32) -> SqlResult<Option<u8>> {
+        let sql = format!(
+            "SELECT id, start_time, duration FROM sessions \
+             WHERE state = 'completed' \
+             AND date(start_time, 'localtime') >= date('now', 'localtime', '-{} days')",
+            days.saturating_sub(1)
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        let mut totals = (0u32, 0u32); // (sum, count)
+        while let Some(row) = rows.next()? {
+            let s_raw: String = row.get(1)?;
+            let duration: f64 = row.get(2)?;
+            let start = match chrono::DateTime::parse_from_rfc3339(&s_raw) {
+                Ok(d) => d.with_timezone(&Utc),
+                Err(_) => continue,
+            };
+            let count =
+                self.distractions_in_session_window(&start, duration as f32).unwrap_or(0);
+            let attention = 100u32.saturating_sub(count.saturating_mul(20));
+            totals.0 = totals.0.saturating_add(attention);
+            totals.1 = totals.1.saturating_add(1);
+        }
+        if totals.1 == 0 {
+            Ok(None)
+        } else {
+            Ok(Some((totals.0 / totals.1) as u8))
+        }
+    }
+
+    /// Focus minutes by hour of day (0-23) for the last `days` days.
+    /// Powers the "¿Cuándo te concentras mejor?" chart. Returns 24
+    /// entries (label `00`..`23`, minutes), padding zeros for empty buckets.
+    pub fn focus_minutes_by_hour(&self, days: u32) -> SqlResult<Vec<(String, u32)>> {
+        let sql = format!(
+            "SELECT CAST(strftime('%H', start_time, 'localtime') AS INTEGER) AS h, \
+                    COALESCE(SUM(duration), 0) \
+             FROM sessions \
+             WHERE state = 'completed' \
+             AND date(start_time, 'localtime') >= date('now', 'localtime', '-{} days') \
+             GROUP BY h",
+            days.saturating_sub(1)
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        let mut have: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        while let Some(row) = rows.next()? {
+            let h: i64 = row.get(0)?;
+            let secs: f64 = row.get(1)?;
+            have.insert(h.clamp(0, 23) as u32, (secs / 60.0) as u32);
+        }
+        let mut out = Vec::with_capacity(24);
+        for h in 0..24u32 {
+            out.push((format!("{:02}", h), have.get(&h).copied().unwrap_or(0)));
+        }
+        Ok(out)
+    }
+
+    /// Lifetime breakdown of seeds by kind. Powers the donut/breakdown
+    /// card. Returns rows like `("session", 45)`, `("attention_bonus", 20)`.
+    pub fn seeds_by_kind(&self) -> SqlResult<Vec<(String, u32)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT kind, COALESCE(SUM(amount), 0) FROM seeds GROUP BY kind ORDER BY 2 DESC")?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u32));
+        }
+        Ok(out)
+    }
+
+    /// Longest historical streak of consecutive *valid* completed
+    /// sessions (no gap = same chain in the engine sense). Computed by
+    /// scanning sessions ordered by start_time and counting runs.
+    pub fn longest_valid_streak(&self) -> SqlResult<u32> {
+        let mut stmt = self.conn.prepare(
+            "SELECT is_valid FROM sessions WHERE state = 'completed' ORDER BY start_time ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut current = 0u32;
+        let mut best = 0u32;
+        while let Some(row) = rows.next()? {
+            let valid: i64 = row.get::<_, i64>(0).unwrap_or(0);
+            if valid != 0 {
+                current += 1;
+                if current > best {
+                    best = current;
+                }
+            } else {
+                current = 0;
+            }
+        }
+        Ok(best)
+    }
+
+    /// Single longest completed session ever. Returns
+    /// `(start_iso, duration_secs, category)` or None when DB is empty.
+    pub fn longest_session(&self) -> SqlResult<Option<(String, u32, String)>> {
+        let row = self.conn.query_row(
+            "SELECT start_time, duration, category FROM sessions \
+             WHERE state = 'completed' ORDER BY duration DESC LIMIT 1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)? as u32,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        );
+        match row {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Days in the current local month with at least one valid completed
+    /// session AND zero distraction events. "Perfect days" achievement.
+    pub fn perfect_days_this_month(&self) -> SqlResult<u32> {
+        // Days with at least one completed session this month.
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT date(start_time, 'localtime') AS d FROM sessions \
+             WHERE state = 'completed' \
+             AND strftime('%Y-%m', start_time, 'localtime') = strftime('%Y-%m', 'now', 'localtime')",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut days = Vec::new();
+        while let Some(row) = rows.next()? {
+            days.push(row.get::<_, String>(0)?);
+        }
+        let mut perfect = 0u32;
+        for d in days {
+            // Any distraction event recorded that local-day → not perfect.
+            let count: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM distraction_events \
+                     WHERE date(at, 'localtime') = ?",
+                    rusqlite::params![d],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if count == 0 {
+                perfect += 1;
+            }
+        }
+        Ok(perfect)
+    }
+
+    /// Validity rate (valid / total) of completed sessions in the
+    /// last `days`. Returns (valid, total).
+    pub fn validity_last_days(&self, days: u32) -> SqlResult<(u32, u32)> {
+        let sql = format!(
+            "SELECT COUNT(*) FROM sessions WHERE state = 'completed' \
+             AND date(start_time, 'localtime') >= date('now', 'localtime', '-{} days')",
+            days.saturating_sub(1)
+        );
+        let total: i64 = self.conn.query_row(&sql, [], |r| r.get(0)).unwrap_or(0);
+        let sql_valid = format!(
+            "SELECT COUNT(*) FROM sessions WHERE state = 'completed' AND is_valid = 1 \
+             AND date(start_time, 'localtime') >= date('now', 'localtime', '-{} days')",
+            days.saturating_sub(1)
+        );
+        let valid: i64 = self.conn.query_row(&sql_valid, [], |r| r.get(0)).unwrap_or(0);
+        Ok((valid as u32, total as u32))
+    }
+
     // -------- v1.9.0 seeds ledger --------
 
     /// Persist one seed award. `kind` is a free-form string used by
@@ -638,7 +814,7 @@ impl SessionRepository {
     /// v1.8.0 — every daily summary (date, text, model_id).
     pub fn export_all_summaries(&self) -> SqlResult<Vec<(String, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT date, text, model_id FROM daily_summaries ORDER BY date ASC",
+            "SELECT date, text, model_id FROM summaries ORDER BY date ASC",
         )?;
         let mut rows = stmt.query([])?;
         let mut out = Vec::new();

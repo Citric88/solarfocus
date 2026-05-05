@@ -13,8 +13,12 @@
 use crate::infra::model_download::{download_file, models_dir, DownloadError};
 use std::path::PathBuf;
 
+// v1.12.2 — Ultralytics ships only the .pt PyTorch checkpoint, not the
+// ONNX export. We pull the converted ONNX from a public, no-auth-required
+// HuggingFace mirror; size locked to ~12.7 MB matches the stock
+// yolov8n.onnx export from `ultralytics export format=onnx`.
 const URL: &str =
-    "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.onnx";
+    "https://huggingface.co/s1777/yolo-v8n-onnx/resolve/main/yolov8n.onnx";
 // SHA placeholder — locked once we ship a stable revision pin.
 const SHA: &str = "";
 
