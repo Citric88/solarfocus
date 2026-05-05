@@ -112,7 +112,7 @@ cd solarfocus
 cargo run
 
 # Compilación completa con coach IA + clasificador + Metal.
-cargo run --features llm,classifier,gpu-metal
+cargo run --features llm,classifier,gpu-metal (no implementado aun)
 ```
 
 ### Cargo features
