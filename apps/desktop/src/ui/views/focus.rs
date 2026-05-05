@@ -169,15 +169,20 @@ impl App {
             crate::ui::components::badge_local(
                 match self.settings.language {
                     solar_focus_intelligence::Language::Es =>
-                        "🎯 Modo profundo · sin descansos".to_string(),
+                        "Modo profundo · sin descansos".to_string(),
                     solar_focus_intelligence::Language::En =>
-                        "🎯 Deep mode · no breaks".to_string(),
+                        "Deep mode · no breaks".to_string(),
                 },
                 crate::ui::components::BadgeVariant::Accent,
             )
         } else {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
         };
+
+        // v1.12.1 — always-visible rewards strip. Surfaces seeds + streak
+        // + active category so the new v1.8/v1.9 features have a permanent
+        // home in the Focus canvas, not just a 6 s toast at session end.
+        let rewards_strip: Element<'_, Message> = self.rewards_strip();
 
         let content = column![
             hero,
@@ -191,17 +196,25 @@ impl App {
             cta,
             iced::widget::Space::with_height(Length::Fixed(SPACE_MD as f32)),
             microcopy,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
+            rewards_strip,
             end_link,
         ]
         .spacing(SPACE_MD as u16)
         .align_x(iced::alignment::Horizontal::Center);
 
-        container(content)
+        // v1.12.1 — wrap in scrollable so tall content (deep badge +
+        // deadline + category picker + CTA + microcopy + 2-row rewards
+        // strip) survives short windows instead of clipping. Same fix
+        // already applied to setup_tabs and coach canvases.
+        let inner = container(content)
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .padding(SPACE_XL as u16);
+
+        container(iced::widget::scrollable(inner))
             .width(Length::Fill)
             .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .padding(SPACE_XL as u16)
             .style(|_| container::Style {
                 background: Some(iced::Background::Color(BG)),
                 ..Default::default()
@@ -411,6 +424,69 @@ impl App {
                 ..Default::default()
             }
         })
+        .into()
+    }
+
+    /// v1.12.1 — always-visible rewards strip on the Focus canvas.
+    /// Two-row stack inside a max_width(640) container so the badges
+    /// never overflow even at the 800x600 minimum window. iced 0.13
+    /// has no flex-wrap, so the split is hand-crafted.
+    fn rewards_strip(&self) -> Element<'_, Message> {
+        use crate::ui::components::{badge_local, BadgeVariant};
+        use solar_focus_intelligence::Language;
+        let lang = self.settings.language;
+
+        let seeds_today = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.seeds_today().ok())
+            .unwrap_or(0);
+        let streak = self.pomodoro_engine.sessions_completed();
+        let category = self.settings.last_category.clone();
+
+        let total_label = match lang {
+            Language::Es => format!("Semillas: {}", self.seeds_total_cache),
+            Language::En => format!("Seeds: {}", self.seeds_total_cache),
+        };
+        let today_label = match lang {
+            Language::Es => format!("Hoy +{seeds_today}"),
+            Language::En => format!("Today +{seeds_today}"),
+        };
+        let sessions_label = match lang {
+            Language::Es => format!("Sesiones hoy: {}", self.sessions_today),
+            Language::En => format!("Sessions today: {}", self.sessions_today),
+        };
+        let streak_label = match lang {
+            Language::Es => format!("Racha: {streak}"),
+            Language::En => format!("Streak: {streak}"),
+        };
+        let category_label = match lang {
+            Language::Es => format!("Categoría: {category}"),
+            Language::En => format!("Category: {category}"),
+        };
+
+        let row_primary = iced::widget::row![
+            badge_local(total_label, BadgeVariant::Accent),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            badge_local(today_label, BadgeVariant::Muted),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            badge_local(sessions_label, BadgeVariant::Muted),
+        ]
+        .align_y(iced::alignment::Vertical::Center);
+
+        let row_context = iced::widget::row![
+            badge_local(streak_label, BadgeVariant::Muted),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            badge_local(category_label, BadgeVariant::Muted),
+        ]
+        .align_y(iced::alignment::Vertical::Center);
+
+        container(
+            column![row_primary, row_context]
+                .spacing(SPACE_XS as u16)
+                .align_x(iced::alignment::Horizontal::Center),
+        )
+        .max_width(640)
         .into()
     }
 }

@@ -227,8 +227,28 @@ impl App {
             .unwrap_or_default();
         let week_total: u32 = last7.iter().map(|(_, n)| n).sum();
 
+        // v1.12.1 — solid colored circle drawn as a Container instead of
+        // a unicode glyph (cosmic-text falls back to a stack of bars for
+        // anything outside the bundled font's coverage). 80x80 ACCENT
+        // disc with rounded corners = visually a seed without depending
+        // on font glyph support.
+        let hero_disc: Element<'_, Message> = container(
+            iced::widget::Space::with_height(Length::Fixed(0.0)),
+        )
+        .width(Length::Fixed(80.0))
+        .height(Length::Fixed(80.0))
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(ACCENT)),
+            border: iced::Border {
+                radius: 40.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into();
+
         let header = iced::widget::row![
-            text("🌱").size(FONT_HERO),
+            hero_disc,
             iced::widget::Space::with_width(SPACE_MD as f32),
             column![
                 text(format!("{}", total))
@@ -283,7 +303,15 @@ impl App {
                         },
                         ..Default::default()
                     });
-                let day_label = day.split('-').last().unwrap_or("?").to_string();
+                // v1.12.1 — weekday short label (M/T/W/...) so the
+                // 7-day garden chart reads consistently with Stats.
+                let day_label = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+                    .ok()
+                    .map(|d| {
+                        use chrono::Datelike;
+                        crate::app::helpers::weekday_short(d.weekday())
+                    })
+                    .unwrap_or_else(|| "?".to_string());
                 column![
                     text(format!("{n}")).size(FONT_TINY).color(TEXT_MUTED),
                     bar,
@@ -328,11 +356,13 @@ impl App {
                         ("attention_bonus", Language::En) => "Attention bonus",
                         ("streak_bonus", Language::Es) => "Racha de 4",
                         ("streak_bonus", Language::En) => "Streak of 4",
+                        ("plugin_bonus", Language::Es) => "Bonus de plugin",
+                        ("plugin_bonus", Language::En) => "Plugin bonus",
                         (_, _) => "+",
                     };
                     container(
                         iced::widget::row![
-                            text(format!("+{amount} 🌱"))
+                            text(format!("+{amount}"))
                                 .size(FONT_SMALL)
                                 .color(ACCENT),
                             iced::widget::Space::with_width(SPACE_SM as f32),

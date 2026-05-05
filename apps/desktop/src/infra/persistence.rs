@@ -532,6 +532,11 @@ impl SessionRepository {
 
     /// Per-day totals for the last N days (oldest first). Each entry:
     /// (yyyy-mm-dd, seeds_count). Powers the 7-day garden chart.
+    ///
+    /// v1.12.1 — pads missing days with 0 so the chart shows the full
+    /// window even when most days had no harvest. Without this the
+    /// garden's 7-bar chart collapsed to a single bar for the only day
+    /// the user earned anything.
     pub fn seeds_last_days(&self, days: u32) -> SqlResult<Vec<(String, u32)>> {
         let sql = format!(
             "SELECT date(earned_at, 'localtime') AS d, COALESCE(SUM(amount), 0) \
@@ -542,9 +547,18 @@ impl SessionRepository {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([])?;
-        let mut out = Vec::new();
+        let mut have: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         while let Some(row) = rows.next()? {
-            out.push((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u32));
+            have.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u32);
+        }
+        let today = chrono::Local::now().date_naive();
+        let n = days.max(1) as i64;
+        let mut out = Vec::with_capacity(n as usize);
+        for offset in (0..n).rev() {
+            let d = today - chrono::Duration::days(offset);
+            let key = d.format("%Y-%m-%d").to_string();
+            let v = have.get(&key).copied().unwrap_or(0);
+            out.push((key, v));
         }
         Ok(out)
     }
