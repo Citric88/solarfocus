@@ -212,6 +212,29 @@ impl App {
                             "Session saved — focus below threshold, no harvest.".to_string(),
                     }
                 };
+                // v1.10.0 — Deep mode: chain straight into the next focus
+                // session, skipping Break entirely. The seeds toast was
+                // already set above; layer a brief "encadenando" line and
+                // dispatch StartFocus, which re-fires SessionStart coaching
+                // for free.
+                if self.settings.deep_mode_enabled {
+                    let chain_text = match self.settings.language {
+                        Language::Es => format!(
+                            "{} · 🎯 Encadenando otra sesión profunda…",
+                            toast_text
+                        ),
+                        Language::En => format!(
+                            "{} · 🎯 Chaining another deep session…",
+                            toast_text
+                        ),
+                    };
+                    self.toast = Some(Toast {
+                        text: chain_text,
+                        expires_at: Instant::now() + Duration::from_secs(4),
+                    });
+                    return Task::done(Message::StartFocus);
+                }
+
                 self.toast = Some(Toast {
                     text: toast_text,
                     expires_at: Instant::now() + Duration::from_secs(6),
@@ -1358,6 +1381,24 @@ impl App {
                 let clamped = value.min(100);
                 self.settings.min_attention_for_valid_session = clamped;
                 self.settings.save();
+                Task::none()
+            }
+
+            Message::ToggleDeepMode(enabled) => {
+                self.settings.deep_mode_enabled = enabled;
+                self.settings.save();
+                let text = match (enabled, self.settings.language) {
+                    (true, Language::Es) =>
+                        "Modo profundo activado: las sesiones se encadenan sin descanso.",
+                    (true, Language::En) =>
+                        "Deep mode on: sessions chain back-to-back without breaks.",
+                    (false, Language::Es) => "Modo profundo desactivado.",
+                    (false, Language::En) => "Deep mode off.",
+                };
+                self.toast = Some(Toast {
+                    text: text.to_string(),
+                    expires_at: Instant::now() + Duration::from_secs(4),
+                });
                 Task::none()
             }
 

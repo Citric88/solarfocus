@@ -186,6 +186,54 @@ impl App {
             ..Default::default()
         });
 
+        let deep_mode_card = container(
+            column![
+                iced::widget::row![
+                    text(match self.settings.language {
+                        Language::Es => "Modo estudio profundo",
+                        Language::En => "Deep study mode",
+                    })
+                    .size(FONT_BODY)
+                    .color(TEXT_PRIMARY),
+                    iced::widget::horizontal_space(),
+                    chip(
+                        match (self.settings.deep_mode_enabled, self.settings.language) {
+                            (true, Language::Es) => "Desactivar".to_string(),
+                            (true, Language::En) => "Disable".to_string(),
+                            (false, Language::Es) => "Activar".to_string(),
+                            (false, Language::En) => "Enable".to_string(),
+                        },
+                        false,
+                        Message::ToggleDeepMode(!self.settings.deep_mode_enabled),
+                    ),
+                ]
+                .align_y(iced::alignment::Vertical::Center),
+                text(match self.settings.language {
+                    Language::Es =>
+                        "Encadena sesiones de foco sin descansos. Útil para estudio largo o flow profundo. Las sesiones siguen guardándose y cosechando semillas individualmente; usa Esc para cortar la cadena.",
+                    Language::En =>
+                        "Chain focus sessions without breaks. Useful for long study blocks or deep flow. Sessions still save and earn seeds individually; press Esc to break the chain.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+            ]
+            .spacing(SPACE_XS as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: if self.settings.deep_mode_enabled {
+                    ACCENT
+                } else {
+                    ACCENT_DIM
+                },
+            },
+            ..Default::default()
+        });
+
         let validity_card = {
             let current = self.settings.min_attention_for_valid_session;
             let opts: [u8; 5] = [0, 40, 60, 80, 100];
@@ -389,6 +437,7 @@ impl App {
         col = col
             .push(lang_card)
             .push(duration_card)
+            .push(deep_mode_card)
             .push(validity_card)
             .push(ram_card);
         #[cfg(feature = "calendar")]

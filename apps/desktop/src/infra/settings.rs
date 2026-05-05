@@ -151,6 +151,13 @@ pub struct Settings {
     // — in v1.9.0 — to gate seed rewards. Default 60 = 2 distractions max.
     #[serde(default = "default_min_attention")]
     pub min_attention_for_valid_session: u8,
+
+    // v1.10.0 — deep study mode. When on, completed focus sessions chain
+    // back-to-back without the usual Break phase: SessionCompleted still
+    // saves + awards seeds, then the engine restarts focus immediately.
+    // Off by default; the user opts in from Setup → General.
+    #[serde(default)]
+    pub deep_mode_enabled: bool,
 }
 
 fn default_min_attention() -> u8 {
@@ -222,6 +229,7 @@ impl Default for Settings {
             next_deadline_label: String::new(),
             calendar_live_enabled: false,
             min_attention_for_valid_session: default_min_attention(),
+            deep_mode_enabled: false,
         }
     }
 }
