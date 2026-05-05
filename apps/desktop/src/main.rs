@@ -91,6 +91,15 @@ pub enum Message {
     /// max face confidence + when it was captured).
     #[cfg(feature = "presence")]
     YunetVerdict(Result<(infra::presence::Presence, f32, chrono::DateTime<chrono::Local>), String>),
+    // v1.11.0 — YOLOv8n cell-phone detector.
+    #[cfg(feature = "presence")]
+    DownloadYolo,
+    #[cfg(feature = "presence")]
+    YoloDownloaded(Result<(), String>),
+    /// Verdict from a background YOLO inference: max class-67 confidence
+    /// (0..1) + capture timestamp.
+    #[cfg(feature = "presence")]
+    YoloVerdict(Result<(f32, chrono::DateTime<chrono::Local>), String>),
     // v1.3 Wave C — manual next-deadline input (label + HH:MM today).
     #[cfg(feature = "calendar")]
     SetDeadlineLabel(String),
@@ -336,6 +345,12 @@ impl App {
                 last_yunet_at: None,
                 #[cfg(feature = "presence")]
                 last_yunet: None,
+                #[cfg(feature = "presence")]
+                last_yolo_at: None,
+                #[cfg(feature = "presence")]
+                last_yolo_score: None,
+                #[cfg(feature = "presence")]
+                consecutive_phone_samples: 0,
             },
             // PERF-1: probe permission AND kick off the background LLM load
             // (latter is a no-op if no model file present or feature off).

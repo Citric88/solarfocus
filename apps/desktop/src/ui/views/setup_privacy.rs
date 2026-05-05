@@ -313,9 +313,15 @@ impl App {
                 iced::widget::Space::with_height(SPACE_XS as f32),
                 text(match self.settings.language {
                     Language::Es => "Tras 3 muestras consecutivas marcadas 'Ausente', \
-                                     la sesión se pausa automáticamente.",
+                                     la sesión se pausa automáticamente. v1.11.0 añade \
+                                     opcionalmente YOLOv8n para detectar tu celular en \
+                                     cámara: tras 2 detecciones seguidas con confianza ≥ 45 %, \
+                                     la sesión también se pausa.",
                     Language::En => "After 3 consecutive 'Absent' samples, the session \
-                                     auto-pauses.",
+                                     auto-pauses. v1.11.0 optionally adds YOLOv8n to \
+                                     detect your phone in frame: after 2 consecutive \
+                                     detections with confidence ≥ 45 %, the session \
+                                     also auto-pauses.",
                 })
                 .size(FONT_SMALL)
                 .color(TEXT_SECONDARY),
@@ -323,12 +329,14 @@ impl App {
                 text(match self.settings.language {
                     Language::Es => "Lo que NO hacemos: grabar video, guardar imágenes, \
                                      hacer reconocimiento facial, identificar personas, \
-                                     ni enviar nada por la red. La cámara solo se enciende \
-                                     mientras una sesión está activa y la opción está activada.",
+                                     leer códigos del teléfono, ni enviar nada por la red. \
+                                     La cámara solo se enciende mientras una sesión está \
+                                     activa y la opción está activada.",
                     Language::En => "What we DO NOT do: record video, save images, do \
-                                     facial recognition, identify people, or send anything \
-                                     over the network. The camera only turns on while a \
-                                     session is active and the option is enabled.",
+                                     facial recognition, identify people, read your \
+                                     phone screen, or send anything over the network. \
+                                     The camera only turns on while a session is active \
+                                     and the option is enabled.",
                 })
                 .size(FONT_TINY)
                 .color(TEXT_MUTED),

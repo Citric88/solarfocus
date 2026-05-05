@@ -700,11 +700,11 @@ impl App {
             #[cfg(feature = "presence")]
             Message::PresenceProbe => {
                 // Capture + brightness on the UI thread (~5 ms total).
-                // YuNet inference is throttled to once every 3 s and
-                // runs on tokio::task::spawn_blocking so it never
-                // blocks the UI even when each call costs ~200 ms on
-                // CPU at 640×640.
+                // YuNet + YOLO inference each throttled to once every 3 s
+                // and run on tokio::task::spawn_blocking so they never
+                // block the UI (each call costs ~200 ms on CPU at 640×640).
                 const YUNET_THROTTLE_SECS: u64 = 3;
+                const YOLO_THROTTLE_SECS: u64 = 5;
                 if let Some(probe) = self.presence_probe.as_ref() {
                     let probe = probe.clone();
                     match probe.poll() {
@@ -712,13 +712,33 @@ impl App {
                             let captured_at = sample.captured_at;
                             let immediate = Task::done(Message::PresenceReady(Ok(sample)));
                             let now = std::time::Instant::now();
-                            let throttle_ok = self
+                            let mut tasks: Vec<Task<Message>> = vec![immediate];
+
+                            let yunet_throttle_ok = self
                                 .last_yunet_at
                                 .map(|t| now.duration_since(t).as_secs() >= YUNET_THROTTLE_SECS)
                                 .unwrap_or(true);
+                            let yolo_throttle_ok = self
+                                .last_yolo_at
+                                .map(|t| now.duration_since(t).as_secs() >= YOLO_THROTTLE_SECS)
+                                .unwrap_or(true);
+
+                            // Cheap clone of the bytes for YuNet; YOLO
+                            // gets the original to avoid a second copy
+                            // unless both inferences are scheduled this
+                            // tick.
+                            let frame_w = captured.width;
+                            let frame_h = captured.height;
+                            let yunet_bytes = if probe.yunet_engine().is_some() && yunet_throttle_ok {
+                                Some(captured.bytes.clone())
+                            } else {
+                                None
+                            };
+
                             if let Some(engine) = probe.yunet_engine() {
-                                if throttle_ok {
+                                if yunet_throttle_ok {
                                     self.last_yunet_at = Some(now);
+                                    let bytes = yunet_bytes.unwrap_or_default();
                                     let bg = Task::perform(
                                         async move {
                                             tokio::task::spawn_blocking(move || {
@@ -726,11 +746,7 @@ impl App {
                                                     Ok(g) => g,
                                                     Err(_) => return Err("yunet poisoned".to_string()),
                                                 };
-                                                g.infer(
-                                                    &captured.bytes,
-                                                    captured.width,
-                                                    captured.height,
-                                                )
+                                                g.infer(&bytes, frame_w, frame_h)
                                             })
                                             .await
                                             .map_err(|e| e.to_string())
@@ -739,10 +755,39 @@ impl App {
                                         },
                                         Message::YunetVerdict,
                                     );
-                                    return Task::batch(vec![immediate, bg]);
+                                    tasks.push(bg);
                                 }
                             }
-                            immediate
+
+                            if let Some(engine) = probe.yolo_engine() {
+                                if yolo_throttle_ok {
+                                    self.last_yolo_at = Some(now);
+                                    let bytes = captured.bytes;
+                                    let bg = Task::perform(
+                                        async move {
+                                            tokio::task::spawn_blocking(move || {
+                                                let mut g = match engine.lock() {
+                                                    Ok(g) => g,
+                                                    Err(_) => return Err("yolo poisoned".to_string()),
+                                                };
+                                                g.infer(&bytes, frame_w, frame_h)
+                                            })
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                            .and_then(|r| r)
+                                            .map(|score| (score, captured_at))
+                                        },
+                                        Message::YoloVerdict,
+                                    );
+                                    tasks.push(bg);
+                                }
+                            }
+
+                            if tasks.len() == 1 {
+                                tasks.into_iter().next().unwrap()
+                            } else {
+                                Task::batch(tasks)
+                            }
                         }
                         Err(e) => Task::done(Message::PresenceReady(Err(e.to_string()))),
                     }
@@ -958,6 +1003,122 @@ impl App {
                 Task::none()
             }
             #[cfg(feature = "presence")]
+            Message::DownloadYolo => {
+                use crate::infra::yolo_download;
+                if yolo_download::is_present() {
+                    return Task::done(Message::YoloDownloaded(Ok(())));
+                }
+                Task::perform(
+                    async move { yolo_download::download().await.map_err(|e| e.to_string()) },
+                    Message::YoloDownloaded,
+                )
+            }
+            #[cfg(feature = "presence")]
+            Message::YoloDownloaded(result) => {
+                match result {
+                    Ok(()) => {
+                        log::info!("YOLOv8n: download complete");
+                        if self.settings.presence_enabled {
+                            self.presence_probe = None;
+                            return Task::done(Message::TogglePresence(true));
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("YOLOv8n: download failed: {}", e);
+                        self.presence_error = Some(e);
+                    }
+                }
+                Task::none()
+            }
+            #[cfg(feature = "presence")]
+            Message::YoloVerdict(result) => {
+                use crate::infra::presence::PHONE_CONF_MIN;
+                match result {
+                    Ok((score, captured_at)) => {
+                        log::info!(
+                            "YOLO verdict: cell-phone score={:.3} at {}",
+                            score,
+                            captured_at.format("%H:%M:%S")
+                        );
+                        self.last_yolo_score = Some(score);
+                        // Confirmation gate: 2 consecutive ≥ threshold
+                        // samples (~10 s at the 5 s YOLO throttle) before
+                        // we count it as a real distraction.
+                        if score >= PHONE_CONF_MIN {
+                            self.consecutive_phone_samples =
+                                self.consecutive_phone_samples.saturating_add(1);
+                        } else {
+                            self.consecutive_phone_samples = 0;
+                        }
+                        const PHONE_CONFIRM: u8 = 2;
+                        if self.consecutive_phone_samples >= PHONE_CONFIRM
+                            && matches!(
+                                self.pomodoro_engine.state(),
+                                SolarFocusCore::AppState::Focusing(_)
+                            )
+                        {
+                            // Reset so we don't refire every tick.
+                            self.consecutive_phone_samples = 0;
+                            // Always log + auto-pause; same contract as
+                            // window distraction handler in v1.4.1.
+                            self.distractions_today =
+                                self.distractions_today.saturating_add(1);
+                            if let Some(repo) = self.session_repo.as_ref() {
+                                let _ = repo.save_distraction(
+                                    "celular (cámara)",
+                                    Some("presence:phone"),
+                                    score,
+                                );
+                            }
+                            let was_already_paused =
+                                self.pomodoro_engine.is_paused();
+                            if !was_already_paused {
+                                self.pomodoro_engine.pause(0.0);
+                            }
+                            self.toast = Some(Toast {
+                                text: match self.settings.language {
+                                    Language::Es => {
+                                        if was_already_paused {
+                                            "📱 Celular detectado en cámara.".to_string()
+                                        } else {
+                                            "📱 Sesión pausada: celular detectado en cámara.".to_string()
+                                        }
+                                    }
+                                    Language::En => {
+                                        if was_already_paused {
+                                            "📱 Phone detected by camera.".to_string()
+                                        } else {
+                                            "📱 Session paused — phone detected by camera.".to_string()
+                                        }
+                                    }
+                                },
+                                expires_at: Instant::now() + Duration::from_secs(5),
+                            });
+                            // macOS notification — same path as window
+                            // distractions in v1.4.0 rc11.
+                            #[cfg(target_os = "macos")]
+                            {
+                                let body = match self.settings.language {
+                                    Language::Es => "Celular detectado por la cámara",
+                                    Language::En => "Phone detected by camera",
+                                };
+                                let _ = std::process::Command::new("osascript")
+                                    .arg("-e")
+                                    .arg(format!(
+                                        "display notification \"{}\" with title \"SolarFocus OS\" sound name \"Submarine\"",
+                                        body
+                                    ))
+                                    .spawn();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("YOLO inference failed: {}", e);
+                    }
+                }
+                Task::none()
+            }
+            #[cfg(feature = "presence")]
             Message::PresenceReady(result) => {
                 use infra::presence::{DetectionMode, Presence};
                 match result {
@@ -971,7 +1132,10 @@ impl App {
                         let yunet_active = self
                             .presence_probe
                             .as_ref()
-                            .map(|p| p.mode() == DetectionMode::YunetFace)
+                            .map(|p| matches!(
+                                p.mode(),
+                                DetectionMode::YunetFace | DetectionMode::YunetAndYoloPhone,
+                            ))
                             .unwrap_or(false);
                         if yunet_active {
                             return Task::none();
