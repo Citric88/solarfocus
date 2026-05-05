@@ -1,12 +1,12 @@
 //! # SolarFocus OS — App Principal
 //!
 //! v1.2.0-alpha:
-//! - Engine Pomodoro from `solar-focus-core` (unchanged from v1.1.21).
-//! - SQLite session persistence via `infra::persistence` (unchanged).
-//! - NEW: AI-coaching slot in the UI driven by a `solar_focus_intelligence::Coach`
-//!        (Phase 1 ships `MockCoach` — real LLM lands in Phase 3).
-//! - NEW: Window watcher polled every N seconds during focus sessions.
-//! - NEW: User settings persisted to JSON.
+//! - Motor Pomodoro de `solar-focus-core` (sin cambios desde v1.1.21).
+//! - Persistencia de sesiones en SQLite mediante `infra::persistence` (sin cambios).
+//! - NUEVO: Asistente virtual (AI-coaching) en la interfaz manejado por `solar_focus_intelligence::Coach`
+//!        (La Fase 1 usa `MockCoach` — el LLM real llega en la Fase 3).
+//! - NUEVO: Observador de ventanas que corre cada N segundos durante sesiones de enfoque.
+//! - NUEVO: Ajustes del usuario persistidos en JSON.
 
 use iced::{Element, Task, window};
 
@@ -36,6 +36,9 @@ use ui::sidebar::{Route, StatusPill};
 use infra::persistence::SessionRepository;
 use infra::settings::{ClassifierMode, Settings};
 
+/// `Message` define todos los posibles eventos y acciones de la aplicación.
+/// Funciona como el "sistema nervioso" de la interfaz gráfica, procesando clicks,
+/// conteo del tiempo, análisis de Inteligencia Artificial y fin de descargas asíncronas.
 #[derive(Debug, Clone)]
 pub enum Message {
     StartFocus,
@@ -186,6 +189,9 @@ pub enum Message {
 
 
 impl App {
+    /// Constructor principal de la aplicación `App`.
+    /// Inicializa el motor de Pomodoro puro, trata de cargar la base de datos (SQLite),
+    /// lee los ajustes de preferencias del usuario y lanza tareas iniciales en segundo plano.
     pub fn new() -> (Self, Task<Message>) {
         let mut engine = SolarFocusCore::PomodoroEngine::new();
         let session_repo = match SessionRepository::new() {
@@ -644,6 +650,9 @@ impl App {
 }
 
 
+/// Punto de entrada del sistema operativo SolarFocus de Escritorio.
+/// Inicializa el registro de logs, establece el tamaño de la ventana y los colores (Dark Theme),
+/// y comienza el loop de eventos de Iced usando nuestro controlador `App`.
 fn main() -> iced::Result {
     infra::init_logger(false);
 

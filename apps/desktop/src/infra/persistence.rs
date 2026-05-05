@@ -21,7 +21,11 @@ pub struct SessionRecord {
     pub is_valid: bool,               // v1.8 — meets attention threshold
 }
 
-/// Gestor de persistencia SQLite con privacidad garantizada
+/// Repositorio de Persistencia mediante SQLite.
+/// Se encarga de manejar el almacenamiento permanente de manera 100% local y "Privacy First".
+/// Su rol es serializar (guardar) y deserializar (cargar) desde historial de tiempos 
+/// hasta clasificaciones de IA y sistema de recompensas, asegurando que nada salga
+/// nunca del disco local, y evitando bloqueos innecesarios en el hilo principal.
 pub struct SessionRepository {
     conn: Connection,
 }

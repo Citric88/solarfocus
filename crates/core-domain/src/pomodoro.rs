@@ -36,7 +36,11 @@ impl Default for PomodoroConfig {
     }
 }
 
-/// Motor principal del Pomodoro
+/// Motor principal del Pomodoro.
+/// Este componente es el "corazón del dominio" porque se encarga puramente 
+/// del avance numérico del tiempo, el control de la racha (sesiones seguidas)
+/// y las reglas de cambio automático entre "Trabajo" y "Descanso", aislando 
+/// las reglas de negocio de cualquier interfaz gráfica o sistema operativo.
 pub struct PomodoroEngine {
     /// Configuración actual
     config: PomodoroConfig,
