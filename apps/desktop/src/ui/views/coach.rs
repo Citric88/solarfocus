@@ -176,9 +176,15 @@ impl App {
             iced::widget::Space::with_height(Length::Fixed(0.0)).into()
         };
 
+        // v1.9.0 — solarpunk garden. Hero counter + 7-day chart + ledger
+        // of last 10 seed events. Pure pull from the seeds table; no
+        // expensive recompute.
+        let garden = self.view_garden();
+
         let body = column![
             title,
             subtitle,
+            garden,
             live,
             history_title,
             history_col,
@@ -188,13 +194,201 @@ impl App {
         .padding(SPACE_XL as u16)
         .max_width(720);
 
-        container(body)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG)),
-                ..Default::default()
+        iced::widget::scrollable(
+            container(body)
+                .width(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(BG)),
+                    ..Default::default()
+                }),
+        )
+        .height(Length::Fill)
+        .into()
+    }
+
+    /// v1.9.0 — solarpunk garden. Hero counter + bilingual subtitle +
+    /// 7-day mini-chart + ledger.
+    fn view_garden(&self) -> Element<'_, Message> {
+        use crate::ui::components::{badge_local, BadgeVariant};
+        use solar_focus_intelligence::Language;
+
+        let lang = self.settings.language;
+        let total = self.seeds_total_cache;
+
+        let today = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.seeds_today().ok())
+            .unwrap_or(0);
+        let last7: Vec<(String, u32)> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.seeds_last_days(7).ok())
+            .unwrap_or_default();
+        let week_total: u32 = last7.iter().map(|(_, n)| n).sum();
+
+        let header = iced::widget::row![
+            text("🌱").size(FONT_HERO),
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            column![
+                text(format!("{}", total))
+                    .size(FONT_HERO)
+                    .color(TEXT_PRIMARY),
+                text(match lang {
+                    Language::Es => "Semillas cultivadas",
+                    Language::En => "Seeds grown",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+            ]
+            .spacing(2),
+            iced::widget::horizontal_space(),
+            column![
+                badge_local(
+                    match lang {
+                        Language::Es => format!("Hoy +{today}"),
+                        Language::En => format!("Today +{today}"),
+                    },
+                    BadgeVariant::Accent,
+                ),
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                badge_local(
+                    match lang {
+                        Language::Es => format!("Semana +{week_total}"),
+                        Language::En => format!("Week +{week_total}"),
+                    },
+                    BadgeVariant::Muted,
+                ),
+            ]
+            .spacing(2),
+        ]
+        .align_y(iced::alignment::Vertical::Center);
+
+        // Mini bar chart for last 7 days. Normalised to the day with the
+        // most seeds; empty days render at minimum height for the row to
+        // stay visually present.
+        let max_day: u32 = last7.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
+        let bars: Vec<Element<'_, Message>> = last7
+            .iter()
+            .map(|(day, n)| {
+                let pct = (*n as f32) / (max_day as f32);
+                let height_px = 6.0_f32 + pct * 60.0_f32;
+                let bar = container(iced::widget::Space::with_height(Length::Fixed(height_px)))
+                    .width(Length::Fixed(28.0))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(ACCENT)),
+                        border: iced::Border {
+                            radius: 4.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                let day_label = day.split('-').last().unwrap_or("?").to_string();
+                column![
+                    text(format!("{n}")).size(FONT_TINY).color(TEXT_MUTED),
+                    bar,
+                    text(day_label).size(FONT_TINY).color(TEXT_MUTED),
+                ]
+                .spacing(4)
+                .align_x(iced::alignment::Horizontal::Center)
+                .into()
             })
+            .collect();
+        let chart_row: Element<'_, Message> = if bars.is_empty() {
+            text(match lang {
+                Language::Es => "Aún no has cosechado semillas. Completa una sesión válida (Atención ≥ 60%) para empezar tu jardín.",
+                Language::En => "No seeds harvested yet. Complete a valid session (Focus ≥ 60%) to start your garden.",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED)
             .into()
+        } else {
+            iced::widget::row(bars)
+                .spacing(SPACE_SM as u16)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .into()
+        };
+
+        // Ledger: last 10 events.
+        let recent = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.recent_seeds(10).ok())
+            .unwrap_or_default();
+        let ledger_items: Vec<Element<'_, Message>> = if recent.is_empty() {
+            Vec::new()
+        } else {
+            recent
+                .into_iter()
+                .map(|(when, kind, amount)| {
+                    let kind_label = match (kind.as_str(), lang) {
+                        ("session", Language::Es) => "Sesión completa",
+                        ("session", Language::En) => "Session",
+                        ("attention_bonus", Language::Es) => "Bonus de atención",
+                        ("attention_bonus", Language::En) => "Attention bonus",
+                        ("streak_bonus", Language::Es) => "Racha de 4",
+                        ("streak_bonus", Language::En) => "Streak of 4",
+                        (_, _) => "+",
+                    };
+                    container(
+                        iced::widget::row![
+                            text(format!("+{amount} 🌱"))
+                                .size(FONT_SMALL)
+                                .color(ACCENT),
+                            iced::widget::Space::with_width(SPACE_SM as f32),
+                            text(kind_label.to_string())
+                                .size(FONT_SMALL)
+                                .color(TEXT_PRIMARY),
+                            iced::widget::horizontal_space(),
+                            text(when.chars().take(16).collect::<String>())
+                                .size(FONT_TINY)
+                                .color(TEXT_MUTED),
+                        ]
+                        .padding(SPACE_XS as u16)
+                        .align_y(iced::alignment::Vertical::Center),
+                    )
+                    .padding(SPACE_XS as u16)
+                    .into()
+                })
+                .collect()
+        };
+        let ledger: Element<'_, Message> = if ledger_items.is_empty() {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        } else {
+            column![
+                text(match lang {
+                    Language::Es => "Cosechas recientes",
+                    Language::En => "Recent harvests",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                column(ledger_items).spacing(2),
+            ]
+            .spacing(SPACE_XS as u16)
+            .into()
+        };
+
+        container(
+            column![
+                header,
+                iced::widget::Space::with_height(SPACE_SM as f32),
+                chart_row,
+                iced::widget::Space::with_height(SPACE_XS as f32),
+                ledger,
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_LG as u16)
+        .width(Length::Fixed(640.0))
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 10.0.into(),
+                width: 1.0,
+                color: ACCENT_DIM,
+            },
+            ..Default::default()
+        })
+        .into()
     }
 }

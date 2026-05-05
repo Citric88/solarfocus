@@ -146,13 +146,77 @@ impl App {
                         category: self.settings.last_category.clone(),
                         is_valid,
                     };
-                    match repo.save_session(&record) {
-                        Ok(id) => log::info!(
-                            "Sesión #{id} guardada (atención={score}%, válida={is_valid})"
-                        ),
-                        Err(e) => log::error!("Fallo guardando sesión: {}", e),
+                    let saved_id = match repo.save_session(&record) {
+                        Ok(id) => {
+                            log::info!(
+                                "Sesión #{id} guardada (atención={score}%, válida={is_valid})"
+                            );
+                            Some(id)
+                        }
+                        Err(e) => {
+                            log::error!("Fallo guardando sesión: {}", e);
+                            None
+                        }
+                    };
+
+                    // v1.9.0 — seed earn rules. Only valid sessions count;
+                    // invalid ones get nothing (the whole point of the
+                    // threshold). Three earn paths can stack:
+                    //   1. base — +1 seed per valid session
+                    //   2. attention bonus — +1 if score >= 80
+                    //   3. streak bonus — +1 every 4th completed session
+                    //      (PomodoroEngine::sessions_completed)
+                    if is_valid {
+                        let _ = repo.save_seeds("session", 1, saved_id);
+                        self.seeds_awarded_last = 1;
+                        if score >= 80 {
+                            let _ = repo.save_seeds("attention_bonus", 1, saved_id);
+                            self.seeds_awarded_last += 1;
+                        }
+                        let streak = self.pomodoro_engine.sessions_completed();
+                        if streak > 0 && streak % 4 == 0 {
+                            let _ = repo.save_seeds("streak_bonus", 1, saved_id);
+                            self.seeds_awarded_last += 1;
+                        }
+                        // Refresh cached totals for hot UI reads.
+                        self.seeds_total_cache = repo.total_seeds().unwrap_or(0);
+                    } else {
+                        self.seeds_awarded_last = 0;
                     }
                 }
+
+                // v1.9.0 — surface the harvest as a toast. Coaching message
+                // will follow if AI is enabled but it's slow; the toast is
+                // immediate and unambiguous so the user sees the reward.
+                let toast_text = if self.seeds_awarded_last > 0 {
+                    match self.settings.language {
+                        Language::Es => format!(
+                            "🌱 +{} semilla{} cosechada{} (total {})",
+                            self.seeds_awarded_last,
+                            if self.seeds_awarded_last == 1 { "" } else { "s" },
+                            if self.seeds_awarded_last == 1 { "" } else { "s" },
+                            self.seeds_total_cache,
+                        ),
+                        Language::En => format!(
+                            "🌱 +{} seed{} harvested (total {})",
+                            self.seeds_awarded_last,
+                            if self.seeds_awarded_last == 1 { "" } else { "s" },
+                            self.seeds_total_cache,
+                        ),
+                    }
+                } else {
+                    match self.settings.language {
+                        Language::Es =>
+                            "Sesión guardada — Atención bajo el umbral, no hubo cosecha.".to_string(),
+                        Language::En =>
+                            "Session saved — focus below threshold, no harvest.".to_string(),
+                    }
+                };
+                self.toast = Some(Toast {
+                    text: toast_text,
+                    expires_at: Instant::now() + Duration::from_secs(6),
+                });
+
                 if self.settings.ai_enabled {
                     let fut = self
                         .coach

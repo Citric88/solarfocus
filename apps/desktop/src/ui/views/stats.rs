@@ -94,6 +94,18 @@ impl App {
                 format!("{}", lifetime_n),
                 &format!("{} h totales", lifetime_secs / 3600),
             ),
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            card(
+                match self.settings.language {
+                    Language::Es => "SEMILLAS 🌱",
+                    Language::En => "SEEDS 🌱",
+                },
+                format!("{}", self.seeds_total_cache),
+                match self.settings.language {
+                    Language::Es => "cosechadas",
+                    Language::En => "harvested",
+                },
+            ),
         ];
 
         let (perm_color, perm_text_es, perm_text_en) = match self.permission_status {

@@ -109,6 +109,12 @@ pub struct App {
 
     pub(crate) distractions_today: u32,
 
+    // v1.9.0 — seed counter cache. Updated at boot + after each
+    // SessionCompleted; reads come from `repo.total_seeds()`. The
+    // `_last` field lets the toast announce *this* session's award.
+    pub(crate) seeds_total_cache: u32,
+    pub(crate) seeds_awarded_last: u32,
+
     pub(crate) permission_status: PermissionStatus,
 
     pub(crate) confirming_clear: bool,

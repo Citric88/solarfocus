@@ -139,6 +139,21 @@ impl SessionRepository {
             [],
         )?;
 
+        // v1.9.0 — seed reward ledger. Each row is one award event;
+        // `kind` is one of: 'session', 'attention_bonus', 'streak_bonus'.
+        // `session_id` references sessions.id when applicable (NULL for
+        // future kinds like daily-streak bonuses).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS seeds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                earned_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                session_id INTEGER
+            )",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
 
@@ -471,6 +486,107 @@ impl SessionRepository {
         Ok(records)
     }
 
+    // -------- v1.9.0 seeds ledger --------
+
+    /// Persist one seed award. `kind` is a free-form string used by
+    /// Stats/Garden UI for the ledger ("session", "attention_bonus",
+    /// "streak_bonus"). `session_id` is optional for future kinds.
+    pub fn save_seeds(
+        &self,
+        kind: &str,
+        amount: u32,
+        session_id: Option<u64>,
+    ) -> SqlResult<u64> {
+        let now = chrono::Local::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO seeds (earned_at, kind, amount, session_id) VALUES (?, ?, ?, ?)",
+            rusqlite::params![now, kind, amount as i64, session_id.map(|x| x as i64)],
+        )?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
+
+    /// Sum of every seed earned ever. Lifetime counter.
+    pub fn total_seeds(&self) -> SqlResult<u32> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(SUM(amount), 0) FROM seeds", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+        Ok(total.max(0) as u32)
+    }
+
+    /// Seeds earned today (local timezone).
+    pub fn seeds_today(&self) -> SqlResult<u32> {
+        let total: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0) FROM seeds \
+                 WHERE date(earned_at, 'localtime') = date('now', 'localtime')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(total.max(0) as u32)
+    }
+
+    /// Per-day totals for the last N days (oldest first). Each entry:
+    /// (yyyy-mm-dd, seeds_count). Powers the 7-day garden chart.
+    pub fn seeds_last_days(&self, days: u32) -> SqlResult<Vec<(String, u32)>> {
+        let sql = format!(
+            "SELECT date(earned_at, 'localtime') AS d, COALESCE(SUM(amount), 0) \
+             FROM seeds \
+             WHERE date(earned_at, 'localtime') >= date('now', 'localtime', '-{} days') \
+             GROUP BY d ORDER BY d ASC",
+            days.saturating_sub(1)
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u32));
+        }
+        Ok(out)
+    }
+
+    /// Recent seed events for the ledger view. Newest first.
+    pub fn recent_seeds(&self, limit: u32) -> SqlResult<Vec<(String, String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT earned_at, kind, amount FROM seeds ORDER BY earned_at DESC LIMIT ?",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?.max(0) as u32,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// v1.9.0 — full seed ledger for JSON export.
+    pub fn export_all_seeds(&self) -> SqlResult<Vec<(u64, String, String, u32, Option<u64>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, earned_at, kind, amount, session_id FROM seeds ORDER BY earned_at ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?.max(0) as u32,
+                row.get::<_, Option<i64>>(4)?.map(|x| x as u64),
+            ));
+        }
+        Ok(out)
+    }
+
+    // -------- v1.8.0 export helpers --------
+
     /// v1.8.0 — every session ever, oldest first. Powers JSON/CSV export.
     pub fn export_all_sessions(&self) -> SqlResult<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
@@ -705,6 +821,24 @@ mod tests {
         let invalid_count = rows.iter().filter(|r| !r.is_valid).count();
         assert_eq!(valid_count, 1);
         assert_eq!(invalid_count, 1);
+    }
+
+    /// v1.9.0 — seed ledger writes + aggregates correctly.
+    #[test]
+    fn seeds_persist_and_aggregate() {
+        let repo = fresh_repo();
+        repo.save_seeds("session", 1, Some(42)).unwrap();
+        repo.save_seeds("attention_bonus", 1, Some(42)).unwrap();
+        repo.save_seeds("streak_bonus", 1, None).unwrap();
+        assert_eq!(repo.total_seeds().unwrap(), 3);
+        assert_eq!(repo.seeds_today().unwrap(), 3);
+        let recent = repo.recent_seeds(10).unwrap();
+        assert_eq!(recent.len(), 3);
+        // Newest first; streak bonus inserted last so it sorts first.
+        assert_eq!(recent[0].1, "streak_bonus");
+        let last7 = repo.seeds_last_days(7).unwrap();
+        let total7: u32 = last7.iter().map(|(_, n)| *n).sum();
+        assert_eq!(total7, 3);
     }
 
     /// v1.4.0 — confirmed distraction events persist + aggregate.
