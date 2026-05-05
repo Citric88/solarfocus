@@ -76,7 +76,19 @@ pub const DEFAULT_ABSENT_THRESHOLD: u8 = 3;
 pub enum DetectionMode {
     Brightness,
     YunetFace,
+    /// v1.11.0 — phone-aware. YuNet for face presence + YOLOv8n for the
+    /// cell-phone class (COCO id 67). Both must be loaded.
+    YunetAndYoloPhone,
 }
+
+/// v1.11.0 — minimum YOLOv8 confidence to call a phone "in frame".
+/// COCO class probabilities for cell phone in webcam scenes typically
+/// land at 0.55-0.80 when actually present and < 0.30 otherwise.
+pub const PHONE_CONF_MIN: f32 = 0.45;
+
+/// COCO class id for "cell phone" in the standard 80-class dataset
+/// that YOLOv8n is trained on.
+pub const COCO_CELL_PHONE_CLASS: usize = 67;
 
 pub struct PresenceProbe {
     camera: Mutex<Camera>,
@@ -85,6 +97,9 @@ pub struct PresenceProbe {
     /// hand it to a tokio::spawn_blocking task without holding the
     /// UI thread for the ~200 ms inference call.
     yunet: Option<std::sync::Arc<std::sync::Mutex<YunetEngine>>>,
+    /// v1.11.0 — YOLOv8n cell-phone detector. Same Arc<Mutex<>>
+    /// pattern as YuNet so it can ride a spawn_blocking thread.
+    yolo: Option<std::sync::Arc<std::sync::Mutex<YoloEngine>>>,
     mode: DetectionMode,
 }
 
@@ -198,6 +213,106 @@ impl YunetEngine {
     }
 }
 
+/// v1.11.0 — Send-safe wrapper around the YOLOv8n ONNX session.
+/// Mirrors the YunetEngine pattern: held in Arc<Mutex<>> on
+/// PresenceProbe and cloned into spawn_blocking for inference.
+pub struct YoloEngine {
+    session: ort::session::Session,
+    input_w: u32,
+    input_h: u32,
+    input_name: String,
+}
+
+unsafe impl Send for YoloEngine {}
+unsafe impl Sync for YoloEngine {}
+
+impl YoloEngine {
+    /// Run cell-phone detection on a captured grayscale frame.
+    /// Returns the max class-67 confidence found across all 8400 anchors,
+    /// clamped to [0, 1]. >= PHONE_CONF_MIN means a phone is in frame.
+    pub fn infer(&mut self, gray: &[u8], src_w: u32, src_h: u32) -> Result<f32, String> {
+        use ndarray::Array4;
+        let (w, h) = (self.input_w as usize, self.input_h as usize);
+
+        // Resize gray → 640x640, replicate into RGB, normalize to [0,1].
+        // YOLOv8 expects RGB / 255.0 input.
+        let mut rgb = vec![0f32; w * h * 3];
+        for ty in 0..h {
+            let sy = (ty as u32 * src_h / h as u32).min(src_h.saturating_sub(1));
+            for tx in 0..w {
+                let sx = (tx as u32 * src_w / w as u32).min(src_w.saturating_sub(1));
+                let g = gray[(sy * src_w + sx) as usize] as f32 / 255.0;
+                let idx = (ty * w + tx) * 3;
+                rgb[idx] = g;
+                rgb[idx + 1] = g;
+                rgb[idx + 2] = g;
+            }
+        }
+        let mut tensor = Array4::<f32>::zeros((1, 3, h, w));
+        for c in 0..3 {
+            for y in 0..h {
+                for x in 0..w {
+                    tensor[(0, c, y, x)] = rgb[(y * w + x) * 3 + c];
+                }
+            }
+        }
+        let input_value = ort::value::Value::from_array(tensor)
+            .map_err(|e| e.to_string())?;
+        let input_name = self.input_name.clone();
+        let outputs = self
+            .session
+            .run(ort::inputs![input_name.as_str() => input_value])
+            .map_err(|e| e.to_string())?;
+
+        // YOLOv8 single output shape: [1, 84, 8400] where channels are
+        // 4 bbox (cx,cy,w,h) + 80 COCO class probabilities. We only
+        // need the cell-phone class (id 67), so we scan the slice that
+        // corresponds to channel `4 + 67 = 71` and take its max across
+        // all 8400 anchors.
+        let mut max_phone = 0f32;
+        for (_name, val) in outputs.iter() {
+            let extracted = val.try_extract_tensor::<f32>();
+            let (shape, slice) = match extracted {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            // Expected shape variants: [1, 84, 8400] or [1, 8400, 84].
+            let total = slice.len();
+            if shape.len() != 3 {
+                continue;
+            }
+            let d1 = shape[1] as usize;
+            let d2 = shape[2] as usize;
+            // Channel-major ([1, 84, 8400]) — class 67 lives in
+            // channel index (4 + 67) = 71. Slice that channel: anchors
+            // 0..d2 at offset (71 * d2).
+            if d1 == 84 && d2 > 0 && total == d1 * d2 {
+                let phone_channel = 4 + COCO_CELL_PHONE_CLASS;
+                if phone_channel < d1 {
+                    let base = phone_channel * d2;
+                    for i in 0..d2 {
+                        let v = slice[base + i];
+                        if v.is_finite() && v > max_phone {
+                            max_phone = v;
+                        }
+                    }
+                }
+            } else if d2 == 84 && d1 > 0 && total == d1 * d2 {
+                // Anchor-major ([1, 8400, 84]).
+                let phone_channel = 4 + COCO_CELL_PHONE_CLASS;
+                for anchor in 0..d1 {
+                    let v = slice[anchor * 84 + phone_channel];
+                    if v.is_finite() && v > max_phone {
+                        max_phone = v;
+                    }
+                }
+            }
+        }
+
+        Ok(max_phone.clamp(0.0, 1.0))
+    }
+}
+
 /// Captured frame bytes + dims handed off from `poll()` to a background
 /// YuNet inference task.
 pub struct CapturedFrame {
@@ -225,7 +340,7 @@ impl PresenceProbe {
 
         // Try to load YuNet — non-fatal: if missing or load fails we
         // fall back to brightness heuristic.
-        let (yunet, mode) = match Self::try_load_yunet() {
+        let (yunet, mut mode) = match Self::try_load_yunet() {
             Ok(Some(s)) => {
                 log::info!("PresenceProbe: YuNet ONNX loaded ({}x{})", s.input_w, s.input_h);
                 (Some(std::sync::Arc::new(std::sync::Mutex::new(s))), DetectionMode::YunetFace)
@@ -240,10 +355,37 @@ impl PresenceProbe {
             }
         };
 
+        // v1.11.0 — also try YOLOv8n. Optional: phone detection only
+        // engages if the model has been downloaded. Independent from
+        // YuNet; if YuNet is missing the mode upgrades from
+        // YunetFace → YunetAndYoloPhone only when both are loaded.
+        let yolo = match Self::try_load_yolo() {
+            Ok(Some(y)) => {
+                log::info!(
+                    "PresenceProbe: YOLOv8n ONNX loaded ({}x{}) — phone detector live",
+                    y.input_w, y.input_h
+                );
+                let arc = std::sync::Arc::new(std::sync::Mutex::new(y));
+                if matches!(mode, DetectionMode::YunetFace) {
+                    mode = DetectionMode::YunetAndYoloPhone;
+                }
+                Some(arc)
+            }
+            Ok(None) => {
+                log::info!("PresenceProbe: YOLOv8n model absent — phone detector off");
+                None
+            }
+            Err(e) => {
+                log::warn!("PresenceProbe: YOLOv8n load failed ({e})");
+                None
+            }
+        };
+
         Ok(Self {
             camera: Mutex::new(camera),
             last_mean: Mutex::new(None),
             yunet,
+            yolo,
             mode,
         })
     }
@@ -257,6 +399,35 @@ impl PresenceProbe {
     /// without holding the UI thread.
     pub fn yunet_engine(&self) -> Option<std::sync::Arc<std::sync::Mutex<YunetEngine>>> {
         self.yunet.clone()
+    }
+
+    /// v1.11.0 — same pattern as `yunet_engine` but for the YOLO phone
+    /// detector. Returns None when the model isn't downloaded.
+    pub fn yolo_engine(&self) -> Option<std::sync::Arc<std::sync::Mutex<YoloEngine>>> {
+        self.yolo.clone()
+    }
+
+    fn try_load_yolo() -> Result<Option<YoloEngine>, String> {
+        let path = crate::infra::yolo_download::model_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let session = ort::session::Session::builder()
+            .map_err(|e| e.to_string())?
+            .commit_from_file(&path)
+            .map_err(|e| e.to_string())?;
+        let inputs = session.inputs();
+        let input_name = inputs
+            .first()
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| "images".to_string());
+        let _ = inputs;
+        Ok(Some(YoloEngine {
+            session,
+            input_w: 640,
+            input_h: 640,
+            input_name,
+        }))
     }
 
     fn try_load_yunet() -> Result<Option<YunetEngine>, String> {

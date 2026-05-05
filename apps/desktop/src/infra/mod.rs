@@ -42,6 +42,9 @@ pub mod distilbert_download;
 pub mod presence;
 #[cfg(feature = "presence")]
 pub mod yunet_download;
+// 📱 v1.11.0 — YOLOv8n cell-phone detector (also under `presence` flag).
+#[cfg(feature = "presence")]
+pub mod yolo_download;
 
 // 📅 v1.3 Wave C: read-only macOS calendar awareness (feature-gated).
 #[cfg(feature = "calendar")]

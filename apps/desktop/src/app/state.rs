@@ -164,5 +164,14 @@ pub struct App {
     pub(crate) last_yunet_at: Option<std::time::Instant>,
     #[cfg(feature = "presence")]
     pub(crate) last_yunet: Option<(infra::presence::Presence, chrono::DateTime<chrono::Local>)>,
+
+    // v1.11.0 — phone detector cache + counter for the consecutive-frames
+    // gate. Same shape as the YuNet pair so the UI can show last verdict.
+    #[cfg(feature = "presence")]
+    pub(crate) last_yolo_at: Option<std::time::Instant>,
+    #[cfg(feature = "presence")]
+    pub(crate) last_yolo_score: Option<f32>,
+    #[cfg(feature = "presence")]
+    pub(crate) consecutive_phone_samples: u8,
 }
 

@@ -293,6 +293,12 @@ impl App {
                     (Some(p), _) => match p.mode() {
                         crate::infra::presence::DetectionMode::YunetFace =>
                             pick("Detección facial (YuNet)", "Face detection (YuNet)").to_string(),
+                        crate::infra::presence::DetectionMode::YunetAndYoloPhone =>
+                            pick(
+                                "Cara (YuNet) + celular (YOLOv8n)",
+                                "Face (YuNet) + phone (YOLOv8n)",
+                            )
+                            .to_string(),
                         crate::infra::presence::DetectionMode::Brightness =>
                             pick("Heurística por luminosidad", "Brightness heuristic").to_string(),
                     },
@@ -309,6 +315,28 @@ impl App {
                         pick("Descargar YuNet (~337 KB)", "Download YuNet (~337 KB)").to_string(),
                         false,
                         Message::DownloadYunet,
+                    )
+                };
+                // v1.11.0 — YOLOv8n cell-phone detector. Optional second
+                // model. Same UX pattern as YuNet.
+                let yolo_present = crate::infra::yolo_download::is_present();
+                let yolo_action: Element<'_, Message> = if yolo_present {
+                    text(pick(
+                        "✓ YOLOv8n descargado (~12 MB) — detector de celular activo",
+                        "✓ YOLOv8n downloaded (~12 MB) — phone detector live",
+                    ))
+                    .size(FONT_TINY)
+                    .color(ACCENT)
+                    .into()
+                } else {
+                    chip_local(
+                        pick(
+                            "Descargar YOLOv8n (~12 MB) · detector de celular",
+                            "Download YOLOv8n (~12 MB) · phone detector",
+                        )
+                        .to_string(),
+                        false,
+                        Message::DownloadYolo,
                     )
                 };
                 column![
@@ -346,9 +374,10 @@ impl App {
                     .size(FONT_TINY)
                     .color(TEXT_MUTED),
                     yunet_action,
+                    yolo_action,
                     text(pick(
-                        "Sin YuNet: detección por cambios bruscos de luz. Con YuNet: detección facial real (foto se descarta tras la inferencia).",
-                        "Without YuNet: detection via sharp light swings. With YuNet: actual face detection (frame discarded after inference).",
+                        "Sin YuNet: detección por cambios bruscos de luz. Con YuNet: detección facial real. Con YOLOv8n: además detecta tu celular en cámara y pausa la sesión. Las fotos se descartan tras la inferencia.",
+                        "Without YuNet: detection via sharp light swings. With YuNet: actual face detection. With YOLOv8n: also detects your phone in frame and pauses the session. Frames are discarded after inference.",
                     ))
                     .size(FONT_TINY)
                     .color(TEXT_MUTED),
