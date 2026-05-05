@@ -1306,13 +1306,14 @@ impl App {
                     if matches!(self.route, Route::Setup | Route::Stats) {
                         self.refresh_setup_caches();
                     }
-                    // PERF-2: only re-probe permission if it's still Unknown
-                    // (initial probe may not have landed yet). Manual
-                    // "Re-verificar" button in Privacy tab handles refresh
-                    // after the user grants permission in System Settings.
-                    if matches!(self.route, Route::Stats | Route::Setup)
-                        && self.permission_status == PermissionStatus::Unknown
-                    {
+                    // v1.12.2 — re-probe permission on EVERY entry to
+                    // Stats/Setup, not only when status is Unknown. The
+                    // user may have granted permission in System Settings
+                    // since boot; without this re-check the card was
+                    // permanently stuck reporting "Sin permiso" until the
+                    // user manually pressed "Re-verificar". The probe is
+                    // sub-millisecond so the cost is negligible.
+                    if matches!(self.route, Route::Stats | Route::Setup) {
                         return Task::done(Message::ProbePermission);
                     }
                 }
@@ -1538,20 +1539,7 @@ impl App {
                     Some(repo) => crate::infra::export::export_json(repo),
                     None => return Task::none(),
                 };
-                let toast_text = match (&result, self.settings.language) {
-                    (Ok(p), Language::Es) => {
-                        format!("Exportado: {}", p.display())
-                    }
-                    (Ok(p), Language::En) => {
-                        format!("Exported: {}", p.display())
-                    }
-                    (Err(e), Language::Es) => format!("Error al exportar: {e}"),
-                    (Err(e), Language::En) => format!("Export error: {e}"),
-                };
-                self.toast = Some(Toast {
-                    text: toast_text,
-                    expires_at: Instant::now() + Duration::from_secs(5),
-                });
+                self.handle_export_result(result);
                 Task::none()
             }
 
@@ -1620,17 +1608,55 @@ impl App {
                     Some(repo) => crate::infra::export::export_csv(repo),
                     None => return Task::none(),
                 };
-                let toast_text = match (&result, self.settings.language) {
-                    (Ok(p), Language::Es) => format!("Exportado: {}", p.display()),
-                    (Ok(p), Language::En) => format!("Exported: {}", p.display()),
-                    (Err(e), Language::Es) => format!("Error al exportar: {e}"),
-                    (Err(e), Language::En) => format!("Export error: {e}"),
+                self.handle_export_result(result);
+                Task::none()
+            }
+        }
+    }
+
+    /// v1.12.2 — common export feedback. Saves the path on App so the
+    /// Privacy card can show it inline (the toast only renders on the
+    /// Focus canvas), reveals the file in macOS Finder so the user
+    /// gets immediate confirmation, and still sets the toast for the
+    /// case where the user returns to Focus afterwards.
+    fn handle_export_result(
+        &mut self,
+        result: Result<std::path::PathBuf, crate::infra::export::ExportError>,
+    ) {
+        match result {
+            Ok(path) => {
+                log::info!("Export written: {}", path.display());
+                self.last_export_path = Some(path.clone());
+                self.last_export_error = None;
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(&path)
+                        .spawn();
+                }
+                let toast_text = match self.settings.language {
+                    Language::Es => format!("Exportado: {}", path.display()),
+                    Language::En => format!("Exported: {}", path.display()),
                 };
                 self.toast = Some(Toast {
                     text: toast_text,
-                    expires_at: Instant::now() + Duration::from_secs(5),
+                    expires_at: Instant::now() + Duration::from_secs(6),
                 });
-                Task::none()
+            }
+            Err(e) => {
+                log::warn!("Export failed: {e}");
+                let msg = e.to_string();
+                self.last_export_path = None;
+                self.last_export_error = Some(msg.clone());
+                let toast_text = match self.settings.language {
+                    Language::Es => format!("Error al exportar: {msg}"),
+                    Language::En => format!("Export error: {msg}"),
+                };
+                self.toast = Some(Toast {
+                    text: toast_text,
+                    expires_at: Instant::now() + Duration::from_secs(6),
+                });
             }
         }
     }

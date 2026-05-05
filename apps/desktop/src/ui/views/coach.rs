@@ -197,6 +197,7 @@ impl App {
         iced::widget::scrollable(
             container(body)
                 .width(Length::Fill)
+                .center_x(Length::Fill)
                 .style(|_| container::Style {
                     background: Some(iced::Background::Color(BG)),
                     ..Default::default()

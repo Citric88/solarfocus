@@ -48,6 +48,45 @@ impl App {
             .and_then(|r| r.recent_seeds(10).ok())
             .unwrap_or_default();
 
+        // v1.12.2 Wave 4 — dashboard analytics pulls.
+        let avg_attention_today: Option<u8> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.average_attention_last_days(1).ok().flatten());
+        let avg_attention_7d: Option<u8> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.average_attention_last_days(7).ok().flatten());
+        let focus_by_hour: Vec<(String, u32)> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.focus_minutes_by_hour(30).ok())
+            .unwrap_or_default();
+        let seeds_kind_breakdown: Vec<(String, u32)> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.seeds_by_kind().ok())
+            .unwrap_or_default();
+        let longest_streak: u32 = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.longest_valid_streak().ok())
+            .unwrap_or(0);
+        let longest_session: Option<(String, u32, String)> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.longest_session().ok().flatten());
+        let perfect_days: u32 = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.perfect_days_this_month().ok())
+            .unwrap_or(0);
+        let validity_7d: (u32, u32) = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.validity_last_days(7).ok())
+            .unwrap_or((0, 0));
+
         let card = |title: &str, primary: String, secondary: &str| -> Element<'_, Message> {
             container(
                 column![
@@ -783,6 +822,352 @@ impl App {
         .align_y(iced::alignment::Vertical::Center);
         let cards_with_ring = column![cards_row1, cards_row2].spacing(SPACE_MD as u16);
 
+        // ===== v1.12.2 Wave 4 — dashboard analytics =====
+
+        // Card 1: Atención promedio (hoy + 7d).
+        let attention_card: Element<'_, Message> = {
+            let avg_today_str = match avg_attention_today {
+                Some(n) => format!("{n}%"),
+                None => "—".to_string(),
+            };
+            let avg_7d_str = match avg_attention_7d {
+                Some(n) => format!("{n}%"),
+                None => "—".to_string(),
+            };
+            let valid_pct = if validity_7d.1 > 0 {
+                (validity_7d.0 * 100) / validity_7d.1
+            } else {
+                0
+            };
+            let valid_label = match self.settings.language {
+                Language::Es => format!(
+                    "{}/{} válidas ({}%)",
+                    validity_7d.0, validity_7d.1, valid_pct
+                ),
+                Language::En => format!(
+                    "{}/{} valid ({}%)",
+                    validity_7d.0, validity_7d.1, valid_pct
+                ),
+            };
+            let metric =
+                |label: &str, value: String, sub: String| -> Element<'_, Message> {
+                    container(
+                        column![
+                            text(label.to_string())
+                                .size(FONT_SMALL)
+                                .color(TEXT_MUTED),
+                            text(value).size(FONT_TITLE).color(TEXT_PRIMARY),
+                            text(sub).size(FONT_TINY).color(TEXT_SECONDARY),
+                        ]
+                        .spacing(SPACE_XS as u16),
+                    )
+                    .padding(SPACE_MD as u16)
+                    .width(Length::Fixed(200.0))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(SURFACE)),
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+                };
+            container(
+                column![
+                    text(match self.settings.language {
+                        Language::Es => "Atención y validez",
+                        Language::En => "Focus and validity",
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+                    iced::widget::row![
+                        metric(
+                            match self.settings.language {
+                                Language::Es => "ATENCIÓN HOY",
+                                Language::En => "FOCUS TODAY",
+                            },
+                            avg_today_str,
+                            match self.settings.language {
+                                Language::Es => "promedio de sesiones".to_string(),
+                                Language::En => "session average".to_string(),
+                            },
+                        ),
+                        iced::widget::Space::with_width(SPACE_MD as f32),
+                        metric(
+                            match self.settings.language {
+                                Language::Es => "ATENCIÓN 7D",
+                                Language::En => "FOCUS 7D",
+                            },
+                            avg_7d_str,
+                            valid_label,
+                        ),
+                    ],
+                ]
+                .spacing(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: ACCENT_DIM,
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        // Card 2: Distribución horaria (focus minutes by hour of day, last 30d).
+        let hourly_card: Element<'_, Message> = {
+            let bars: Vec<(String, u32)> = focus_by_hour.clone();
+            let widget = crate::ui::chart::WeeklyChart::new(bars);
+            let canvas: Element<'_, Message> = iced::widget::Canvas::new(widget)
+                .width(Length::Fixed(720.0))
+                .height(Length::Fixed(160.0))
+                .into();
+            let total_min: u32 = focus_by_hour.iter().map(|(_, n)| *n).sum();
+            let best_hour: Option<&(String, u32)> = focus_by_hour
+                .iter()
+                .filter(|(_, n)| *n > 0)
+                .max_by_key(|(_, n)| *n);
+            let summary = match (best_hour, self.settings.language) {
+                (Some((h, n)), Language::Es) => {
+                    format!("Mejor hora: {h}h · {n} min · total 30 días: {total_min} min")
+                }
+                (Some((h, n)), Language::En) => {
+                    format!("Best hour: {h}h · {n} min · 30-day total: {total_min} min")
+                }
+                (None, Language::Es) => "Sin datos suficientes todavía.".to_string(),
+                (None, Language::En) => "Not enough data yet.".to_string(),
+            };
+            container(
+                column![
+                    text(match self.settings.language {
+                        Language::Es => "¿Cuándo te concentras mejor? · últimos 30 días",
+                        Language::En => "When do you focus best? · last 30 days",
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+                    canvas,
+                    text(summary).size(FONT_TINY).color(TEXT_SECONDARY),
+                ]
+                .spacing(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        // Card 3: Origen de semillas (kind breakdown).
+        let seeds_origin_card: Element<'_, Message> = {
+            let total: u32 = seeds_kind_breakdown.iter().map(|(_, n)| *n).sum();
+            let inner: Element<'_, Message> = if seeds_kind_breakdown.is_empty() || total == 0 {
+                text(match self.settings.language {
+                    Language::Es => "Aún no has cosechado semillas.",
+                    Language::En => "No seeds harvested yet.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED)
+                .into()
+            } else {
+                let lang = self.settings.language;
+                let max_count = seeds_kind_breakdown.iter().map(|(_, n)| *n).max().unwrap_or(1);
+                let rows: Vec<Element<'_, Message>> = seeds_kind_breakdown
+                    .iter()
+                    .map(|(kind, n)| {
+                        let label: String = match (kind.as_str(), lang) {
+                            ("session", Language::Es) => "Sesión completa".to_string(),
+                            ("session", Language::En) => "Session".to_string(),
+                            ("attention_bonus", Language::Es) => "Bonus de atención".to_string(),
+                            ("attention_bonus", Language::En) => "Attention bonus".to_string(),
+                            ("streak_bonus", Language::Es) => "Racha de 4".to_string(),
+                            ("streak_bonus", Language::En) => "Streak of 4".to_string(),
+                            ("plugin_bonus", Language::Es) => "Bonus de plugin".to_string(),
+                            ("plugin_bonus", Language::En) => "Plugin bonus".to_string(),
+                            (other, _) => other.to_string(),
+                        };
+                        let pct = (*n * 100) / total.max(1);
+                        let bar_w = ((*n as f32 / max_count as f32) * 360.0).max(2.0);
+                        let bar = container(iced::widget::Space::with_width(Length::Fixed(bar_w)))
+                            .height(Length::Fixed(6.0))
+                            .style(|_| container::Style {
+                                background: Some(iced::Background::Color(ACCENT)),
+                                border: iced::Border {
+                                    radius: 3.0.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            });
+                        column![
+                            iced::widget::row![
+                                text(label).size(FONT_SMALL).color(TEXT_PRIMARY),
+                                iced::widget::horizontal_space(),
+                                text(format!("{n} · {pct}%"))
+                                    .size(FONT_SMALL)
+                                    .color(TEXT_SECONDARY),
+                            ],
+                            bar,
+                        ]
+                        .spacing(2)
+                        .into()
+                    })
+                    .collect();
+                column(rows).spacing(SPACE_SM as u16).into()
+            };
+            container(
+                column![
+                    text(match self.settings.language {
+                        Language::Es => "Origen de tus semillas",
+                        Language::En => "Where your seeds come from",
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+                    inner,
+                ]
+                .spacing(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .width(Length::Fixed(560.0))
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: ACCENT_DIM,
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        // Card 4: Logros — best streak + longest session + perfect days.
+        let achievements_card: Element<'_, Message> = {
+            let achievement = |label: &str, value: String, sub: String| -> Element<'_, Message> {
+                container(
+                    column![
+                        text(label.to_string())
+                            .size(FONT_SMALL)
+                            .color(TEXT_MUTED),
+                        text(value).size(FONT_LEAD).color(TEXT_PRIMARY),
+                        text(sub).size(FONT_TINY).color(TEXT_SECONDARY),
+                    ]
+                    .spacing(2),
+                )
+                .padding(SPACE_MD as u16)
+                .width(Length::Fixed(180.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE_RAISED)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+            };
+            let longest_session_str = match &longest_session {
+                Some((start, secs, cat)) => {
+                    let date = chrono::DateTime::parse_from_rfc3339(start)
+                        .ok()
+                        .map(|d| {
+                            d.with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d")
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| "?".to_string());
+                    (format!("{} min", secs / 60), format!("{cat} · {date}"))
+                }
+                None => ("—".to_string(), "".to_string()),
+            };
+            container(
+                column![
+                    text(match self.settings.language {
+                        Language::Es => "Logros",
+                        Language::En => "Achievements",
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+                    iced::widget::row![
+                        achievement(
+                            match self.settings.language {
+                                Language::Es => "MEJOR RACHA",
+                                Language::En => "BEST STREAK",
+                            },
+                            format!("{longest_streak}"),
+                            match self.settings.language {
+                                Language::Es => "sesiones consecutivas".to_string(),
+                                Language::En => "consecutive sessions".to_string(),
+                            },
+                        ),
+                        iced::widget::Space::with_width(SPACE_MD as f32),
+                        achievement(
+                            match self.settings.language {
+                                Language::Es => "SESIÓN MÁS LARGA",
+                                Language::En => "LONGEST SESSION",
+                            },
+                            longest_session_str.0,
+                            longest_session_str.1,
+                        ),
+                        iced::widget::Space::with_width(SPACE_MD as f32),
+                        achievement(
+                            match self.settings.language {
+                                Language::Es => "DÍAS PERFECTOS",
+                                Language::En => "PERFECT DAYS",
+                            },
+                            format!("{perfect_days}"),
+                            match self.settings.language {
+                                Language::Es => "este mes · sin distracciones".to_string(),
+                                Language::En => "this month · zero distractions".to_string(),
+                            },
+                        ),
+                    ],
+                ]
+                .spacing(SPACE_SM as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: ACCENT_DIM,
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        // Card 5: Coach feedback strip (single line, muted).
+        let coach_feedback_strip: Element<'_, Message> = {
+            let (up, down) = self.feedback_counts_cache;
+            let total = up + down;
+            if total == 0 {
+                iced::widget::Space::with_height(0.0).into()
+            } else {
+                let pct = (up * 100) / total.max(1);
+                let txt = match self.settings.language {
+                    Language::Es => format!(
+                        "Coach IA · {pct}% útil ({up} útiles / {down} no útiles · {total} calificaciones)"
+                    ),
+                    Language::En => format!(
+                        "AI coach · {pct}% helpful ({up} helpful / {down} not / {total} ratings)"
+                    ),
+                };
+                container(text(txt).size(FONT_SMALL).color(TEXT_MUTED))
+                    .padding(SPACE_XS as u16)
+                    .into()
+            }
+        };
+
         let body = column![
             text(match self.settings.language {
                 Language::Es => "Estadísticas",
@@ -792,8 +1177,12 @@ impl App {
             .color(TEXT_PRIMARY),
             perm_card,
             cards_with_ring,
+            attention_card,
+            achievements_card,
             chart_card,
+            hourly_card,
             seed_chart_card,
+            seeds_origin_card,
             seed_ledger_card,
             category_card,
             distractions_card,
@@ -801,12 +1190,20 @@ impl App {
             sessions_title,
             attention_disclaimer,
             sessions_list,
+            coach_feedback_strip,
         ]
         .spacing(SPACE_LG as u16)
         .padding(SPACE_XL as u16)
-        .max_width(680);
+        .max_width(900);
 
-        container(iced::widget::scrollable(body))
+        // v1.12.2 — center the body horizontally so wide windows don't
+        // leave dead space to the right of the scroll bar. The
+        // max_width(900) cap keeps lines readable on ultrawide displays.
+        let centered = container(body)
+            .width(Length::Fill)
+            .center_x(Length::Fill);
+
+        container(iced::widget::scrollable(centered))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| container::Style {

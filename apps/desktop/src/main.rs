@@ -315,6 +315,8 @@ impl App {
                 distractions_today,
                 seeds_total_cache,
                 seeds_awarded_last: 0,
+                last_export_path: None,
+                last_export_error: None,
                 plugins,
                 permission_status: PermissionStatus::Unknown,
                 confirming_clear: false,

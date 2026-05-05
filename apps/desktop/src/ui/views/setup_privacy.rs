@@ -354,6 +354,28 @@ impl App {
         })
         .into();
 
+        // v1.12.2 — last export feedback strip. Toast lives only on the
+        // Focus canvas, so without this the user clicking Export from
+        // Privacy got no visible confirmation. Now the path appears
+        // inline + Finder reveals the file on macOS.
+        let export_status: Element<'_, Message> = match (&self.last_export_path, &self.last_export_error) {
+            (Some(p), _) => {
+                let msg = match self.settings.language {
+                    Language::Es => format!("Último export · {}", p.display()),
+                    Language::En => format!("Last export · {}", p.display()),
+                };
+                text(msg).size(FONT_TINY).color(ACCENT).into()
+            }
+            (None, Some(e)) => {
+                let msg = match self.settings.language {
+                    Language::Es => format!("Error al exportar · {e}"),
+                    Language::En => format!("Export error · {e}"),
+                };
+                text(msg).size(FONT_TINY).color(DANGER).into()
+            }
+            (None, None) => iced::widget::Space::with_height(0.0).into(),
+        };
+
         let export_card = container(
             column![
                 text(match self.settings.language {
@@ -364,11 +386,13 @@ impl App {
                 .color(TEXT_PRIMARY),
                 text(match self.settings.language {
                     Language::Es =>
-                        "Descarga tu historial de sesiones, distracciones y resúmenes \
-                         a tu carpeta Descargas. JSON conserva todo; CSV es solo sesiones.",
+                        "Descarga tu historial de sesiones, distracciones, semillas y resúmenes \
+                         a tu carpeta Descargas. JSON conserva todo; CSV es solo sesiones. \
+                         Al exportar se abre Finder con el archivo seleccionado.",
                     Language::En =>
-                        "Download your sessions, distractions and summaries to your \
-                         Downloads folder. JSON is the full dump; CSV is sessions only.",
+                        "Download your sessions, distractions, seeds and summaries to your \
+                         Downloads folder. JSON is the full dump; CSV is sessions only. \
+                         Finder reveals the file on export.",
                 })
                 .size(FONT_SMALL)
                 .color(TEXT_SECONDARY),
@@ -390,6 +414,7 @@ impl App {
                         Message::ExportCsv,
                     ),
                 ],
+                export_status,
             ]
             .spacing(SPACE_XS as u16),
         )
