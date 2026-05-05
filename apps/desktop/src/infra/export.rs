@@ -97,16 +97,17 @@ pub fn export_json(repo: &SessionRepository) -> Result<PathBuf, ExportError> {
 fn write_csv(repo: &SessionRepository, path: &Path) -> Result<(), ExportError> {
     let sessions = repo.export_all_sessions()?;
     let mut f = File::create(path)?;
-    writeln!(f, "id,start_time,duration_seconds,state,category")?;
+    writeln!(f, "id,start_time,duration_seconds,state,category,is_valid")?;
     for s in &sessions {
         writeln!(
             f,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{}",
             s.id.unwrap_or(0),
             csv_escape(&s.start_time.to_rfc3339()),
             s.duration as u32,
             csv_escape(&s.state),
             csv_escape(&s.category),
+            if s.is_valid { 1 } else { 0 },
         )?;
     }
     Ok(())
@@ -116,10 +117,11 @@ fn write_json(repo: &SessionRepository, path: &Path) -> Result<(), ExportError> 
     let sessions = repo.export_all_sessions()?;
     let distractions = repo.export_all_distractions()?;
     let summaries = repo.export_all_summaries()?;
+    let seeds = repo.export_all_seeds()?;
 
     let mut f = File::create(path)?;
     writeln!(f, "{{")?;
-    writeln!(f, "  \"export_version\": 1,")?;
+    writeln!(f, "  \"export_version\": 2,")?;
     writeln!(f, "  \"app\": \"SolarFocus OS\",")?;
     writeln!(
         f,
@@ -137,9 +139,33 @@ fn write_json(repo: &SessionRepository, path: &Path) -> Result<(), ExportError> 
 
     writeln!(f, "  \"daily_summaries\": [")?;
     write_summaries_json(&mut f, &summaries)?;
+    writeln!(f, "  ],")?;
+
+    writeln!(f, "  \"seeds\": [")?;
+    write_seeds_json(&mut f, &seeds)?;
     writeln!(f, "  ]")?;
 
     writeln!(f, "}}")?;
+    Ok(())
+}
+
+fn write_seeds_json(
+    f: &mut File,
+    rows: &[(u64, String, String, u32, Option<u64>)],
+) -> std::io::Result<()> {
+    for (i, (id, earned_at, kind, amount, session_id)) in rows.iter().enumerate() {
+        let comma = if i + 1 < rows.len() { "," } else { "" };
+        let session_id_json = match session_id {
+            Some(sid) => sid.to_string(),
+            None => "null".to_string(),
+        };
+        writeln!(
+            f,
+            "    {{\"id\": {id}, \"earned_at\": \"{}\", \"kind\": \"{}\", \"amount\": {amount}, \"session_id\": {session_id_json}}}{comma}",
+            json_escape(earned_at),
+            json_escape(kind),
+        )?;
+    }
     Ok(())
 }
 
@@ -148,12 +174,13 @@ fn write_sessions_json(f: &mut File, rows: &[SessionRecord]) -> std::io::Result<
         let comma = if i + 1 < rows.len() { "," } else { "" };
         writeln!(
             f,
-            "    {{\"id\": {}, \"start_time\": \"{}\", \"duration_seconds\": {}, \"state\": \"{}\", \"category\": \"{}\"}}{comma}",
+            "    {{\"id\": {}, \"start_time\": \"{}\", \"duration_seconds\": {}, \"state\": \"{}\", \"category\": \"{}\", \"is_valid\": {}}}{comma}",
             s.id.unwrap_or(0),
             json_escape(&s.start_time.to_rfc3339()),
             s.duration as u32,
             json_escape(&s.state),
             json_escape(&s.category),
+            s.is_valid,
         )?;
     }
     Ok(())

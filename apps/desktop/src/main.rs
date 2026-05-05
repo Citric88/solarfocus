@@ -254,6 +254,10 @@ impl App {
             .as_ref()
             .and_then(|r| r.feedback_counts().ok())
             .unwrap_or((0, 0));
+        let seeds_total_cache: u32 = session_repo
+            .as_ref()
+            .and_then(|r| r.total_seeds().ok())
+            .unwrap_or(0);
         // v1.3 Wave A1 — capture initial duration strings before `settings`
         // is moved into Self.
         let custom_focus_str = settings.focus_minutes.to_string();
@@ -289,6 +293,8 @@ impl App {
                 consecutive_distraction_samples: 0,
                 toast: None,
                 distractions_today,
+                seeds_total_cache,
+                seeds_awarded_last: 0,
                 permission_status: PermissionStatus::Unknown,
                 confirming_clear: false,
                 download_active: Arc::new(AtomicBool::new(false)),
