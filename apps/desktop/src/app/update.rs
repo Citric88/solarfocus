@@ -205,14 +205,14 @@ impl App {
                 let toast_text = if self.seeds_awarded_last > 0 {
                     match self.settings.language {
                         Language::Es => format!(
-                            "🌱 +{} semilla{} cosechada{} (total {})",
+                            "[+] +{} semilla{} cosechada{} (total {})",
                             self.seeds_awarded_last,
                             if self.seeds_awarded_last == 1 { "" } else { "s" },
                             if self.seeds_awarded_last == 1 { "" } else { "s" },
                             self.seeds_total_cache,
                         ),
                         Language::En => format!(
-                            "🌱 +{} seed{} harvested (total {})",
+                            "[+] +{} seed{} harvested (total {})",
                             self.seeds_awarded_last,
                             if self.seeds_awarded_last == 1 { "" } else { "s" },
                             self.seeds_total_cache,
@@ -234,11 +234,11 @@ impl App {
                 if self.settings.deep_mode_enabled {
                     let chain_text = match self.settings.language {
                         Language::Es => format!(
-                            "{} · 🎯 Encadenando otra sesión profunda…",
+                            "{} · (Deep)Encadenando otra sesión profunda…",
                             toast_text
                         ),
                         Language::En => format!(
-                            "{} · 🎯 Chaining another deep session…",
+                            "{} · (Deep)Chaining another deep session…",
                             toast_text
                         ),
                     };
@@ -1093,16 +1093,16 @@ impl App {
                                 text: match self.settings.language {
                                     Language::Es => {
                                         if was_already_paused {
-                                            "📱 Celular detectado en cámara.".to_string()
+                                            "[Phone]Celular detectado en cámara.".to_string()
                                         } else {
-                                            "📱 Sesión pausada: celular detectado en cámara.".to_string()
+                                            "[Phone]Sesión pausada: celular detectado en cámara.".to_string()
                                         }
                                     }
                                     Language::En => {
                                         if was_already_paused {
-                                            "📱 Phone detected by camera.".to_string()
+                                            "[Phone]Phone detected by camera.".to_string()
                                         } else {
-                                            "📱 Session paused — phone detected by camera.".to_string()
+                                            "[Phone]Session paused — phone detected by camera.".to_string()
                                         }
                                     }
                                 },
@@ -1589,8 +1589,8 @@ impl App {
                 let count = self.plugins.len();
                 self.toast = Some(Toast {
                     text: match self.settings.language {
-                        Language::Es => format!("🧩 {count} plugin(s) recargados."),
-                        Language::En => format!("🧩 {count} plugin(s) reloaded."),
+                        Language::Es => format!("{count} plugin(s) recargados."),
+                        Language::En => format!("{count} plugin(s) reloaded."),
                     },
                     expires_at: Instant::now() + Duration::from_secs(4),
                 });

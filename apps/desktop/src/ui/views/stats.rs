@@ -31,6 +31,23 @@ impl App {
         let today_secs: u32 = week.last().map(|(_, s)| *s).unwrap_or(0);
         let week_secs: u32 = week.iter().map(|(_, s)| *s).sum();
 
+        // v1.12.1 Wave 2 — fresh seed pulls for cards + new charts.
+        let seeds_today_count: u32 = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.seeds_today().ok())
+            .unwrap_or(0);
+        let seeds_week: Vec<(String, u32)> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.seeds_last_days(7).ok())
+            .unwrap_or_default();
+        let seeds_recent: Vec<(String, String, u32)> = self
+            .session_repo
+            .as_ref()
+            .and_then(|r| r.recent_seeds(10).ok())
+            .unwrap_or_default();
+
         let card = |title: &str, primary: String, secondary: &str| -> Element<'_, Message> {
             container(
                 column![
@@ -55,58 +72,55 @@ impl App {
             .into()
         };
 
-        let cards = iced::widget::row![
-            card(
-                match self.settings.language {
-                    Language::Es => "HOY",
-                    Language::En => "TODAY",
-                },
-                format!("{}", self.sessions_today),
-                &format!("{} min de foco", today_secs / 60),
-            ),
-            iced::widget::Space::with_width(SPACE_MD as f32),
-            card(
-                match self.settings.language {
-                    Language::Es => "DISTRACCIONES",
-                    Language::En => "DISTRACTIONS",
-                },
-                format!("{}", self.distractions_today),
-                match self.settings.language {
-                    Language::Es => "hoy",
-                    Language::En => "today",
-                },
-            ),
-            iced::widget::Space::with_width(SPACE_MD as f32),
-            card(
-                match self.settings.language {
-                    Language::Es => "ESTA SEMANA",
-                    Language::En => "THIS WEEK",
-                },
-                format!("{} min", week_secs / 60),
-                &format!("{} sesiones de coaching", up + down),
-            ),
-            iced::widget::Space::with_width(SPACE_MD as f32),
-            card(
-                match self.settings.language {
-                    Language::Es => "TOTAL",
-                    Language::En => "ALL-TIME",
-                },
-                format!("{}", lifetime_n),
-                &format!("{} h totales", lifetime_secs / 3600),
-            ),
-            iced::widget::Space::with_width(SPACE_MD as f32),
-            card(
-                match self.settings.language {
-                    Language::Es => "SEMILLAS 🌱",
-                    Language::En => "SEEDS 🌱",
-                },
-                format!("{}", self.seeds_total_cache),
-                match self.settings.language {
-                    Language::Es => "cosechadas",
-                    Language::En => "harvested",
-                },
-            ),
-        ];
+        // v1.12.1 — split each KPI card into a named binding so the
+        // body can stack them in a 2-row layout. Each card is the same
+        // 200 px-wide container.
+        let card_today = card(
+            match self.settings.language {
+                Language::Es => "HOY",
+                Language::En => "TODAY",
+            },
+            format!("{}", self.sessions_today),
+            &format!("{} min de foco", today_secs / 60),
+        );
+        let card_distractions = card(
+            match self.settings.language {
+                Language::Es => "DISTRACCIONES",
+                Language::En => "DISTRACTIONS",
+            },
+            format!("{}", self.distractions_today),
+            match self.settings.language {
+                Language::Es => "hoy",
+                Language::En => "today",
+            },
+        );
+        let card_week = card(
+            match self.settings.language {
+                Language::Es => "ESTA SEMANA",
+                Language::En => "THIS WEEK",
+            },
+            format!("{} min", week_secs / 60),
+            &format!("{} sesiones de coaching", up + down),
+        );
+        let card_lifetime = card(
+            match self.settings.language {
+                Language::Es => "TOTAL",
+                Language::En => "ALL-TIME",
+            },
+            format!("{}", lifetime_n),
+            &format!("{} h totales", lifetime_secs / 3600),
+        );
+        let card_seeds = card(
+            match self.settings.language {
+                Language::Es => "SEMILLAS",
+                Language::En => "SEEDS",
+            },
+            format!("{}", self.seeds_total_cache),
+            &match self.settings.language {
+                Language::Es => format!("Hoy: +{}", seeds_today_count),
+                Language::En => format!("Today: +{}", seeds_today_count),
+            },
+        );
 
         let (perm_color, perm_text_es, perm_text_en) = match self.permission_status {
             PermissionStatus::Granted => (
@@ -319,6 +333,118 @@ impl App {
             },
             ..Default::default()
         });
+
+        // v1.12.1 Wave 2 — weekly seeds chart. Same WeeklyChart widget,
+        // ACCENT_DIM color so the eye reads it as secondary to focus
+        // minutes above.
+        let seed_chart_bars: Vec<(String, u32)> = seeds_week
+            .iter()
+            .map(|(d, n)| {
+                let parsed = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+                let label = parsed
+                    .map(|d| weekday_short(d.weekday()))
+                    .unwrap_or("?".to_string());
+                (label, *n)
+            })
+            .collect();
+        let seed_chart_widget = {
+            let mut wc = crate::ui::chart::WeeklyChart::new(seed_chart_bars);
+            wc.bar_color = ACCENT_DIM;
+            wc
+        };
+        let seed_chart_canvas: Element<'_, Message> = iced::widget::Canvas::new(seed_chart_widget)
+            .width(Length::Fixed(560.0))
+            .height(Length::Fixed(160.0))
+            .into();
+        let seed_chart_card = container(
+            column![
+                text(match self.settings.language {
+                    Language::Es => "Semillas por día · últimos 7 días",
+                    Language::En => "Seeds per day · last 7 days",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
+                seed_chart_canvas,
+            ]
+            .spacing(SPACE_SM as u16),
+        )
+        .padding(SPACE_MD as u16)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(SURFACE)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        // v1.12.1 Wave 2 — seed ledger panel. Last 10 harvest events
+        // with localized kind labels.
+        let seed_ledger_card: Element<'_, Message> = {
+            let title = text(match self.settings.language {
+                Language::Es => "Cosechas recientes",
+                Language::En => "Recent harvests",
+            })
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED);
+
+            let inner: Element<'_, Message> = if seeds_recent.is_empty() {
+                text(match self.settings.language {
+                    Language::Es => "Aún no has cosechado semillas. Completa una sesión válida (Atención ≥ umbral) para empezar.",
+                    Language::En => "No seeds harvested yet. Complete a valid session (Focus ≥ threshold) to begin.",
+                })
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED)
+                .into()
+            } else {
+                let lang = self.settings.language;
+                let rows: Vec<Element<'_, Message>> = seeds_recent
+                    .iter()
+                    .map(|(when, kind, amount)| {
+                        let kind_label: String = match (kind.as_str(), lang) {
+                            ("session", Language::Es) => "Sesión completa".to_string(),
+                            ("session", Language::En) => "Session".to_string(),
+                            ("attention_bonus", Language::Es) => "Bonus de atención".to_string(),
+                            ("attention_bonus", Language::En) => "Attention bonus".to_string(),
+                            ("streak_bonus", Language::Es) => "Racha de 4".to_string(),
+                            ("streak_bonus", Language::En) => "Streak of 4".to_string(),
+                            ("plugin_bonus", Language::Es) => "Bonus de plugin".to_string(),
+                            ("plugin_bonus", Language::En) => "Plugin bonus".to_string(),
+                            (other, _) => other.to_string(),
+                        };
+                        container(
+                            iced::widget::row![
+                                text(format!("+{amount}")).size(FONT_SMALL).color(ACCENT),
+                                iced::widget::Space::with_width(SPACE_SM as f32),
+                                badge_local(kind_label, BadgeVariant::Accent),
+                                iced::widget::horizontal_space(),
+                                text(when.chars().take(16).collect::<String>())
+                                    .size(FONT_TINY)
+                                    .color(TEXT_MUTED),
+                            ]
+                            .padding(SPACE_XS as u16)
+                            .align_y(iced::alignment::Vertical::Center),
+                        )
+                        .padding(SPACE_XS as u16)
+                        .into()
+                    })
+                    .collect();
+                column(rows).spacing(SPACE_XS as u16).into()
+            };
+
+            container(column![title, inner].spacing(SPACE_SM as u16))
+                .padding(SPACE_MD as u16)
+                .width(Length::Fixed(560.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
 
         let recap_card: Element<'_, Message> = if let Some((d, t)) = &self.recap {
             container(
@@ -587,6 +713,76 @@ impl App {
                 .into()
         };
 
+        // v1.12.1 Wave 2 — streak ring beside the cards. Shows progress
+        // toward the next streak-of-4 bonus (sessions_completed % 4 / 4).
+        let streak_ring: Element<'_, Message> = {
+            let streak = self.pomodoro_engine.sessions_completed();
+            let progress = ((streak % 4) as f32) / 4.0;
+            let display = if progress == 0.0 && streak > 0 {
+                1.0 // just hit 4 → show full
+            } else {
+                progress
+            };
+            let ring = crate::ui::ring::Ring {
+                progress: display,
+                color: ACCENT,
+                track_color: SURFACE_RAISED,
+                thickness: 8.0,
+            };
+            let canvas: Element<'_, Message> = iced::widget::Canvas::new(ring)
+                .width(Length::Fixed(86.0))
+                .height(Length::Fixed(86.0))
+                .into();
+            container(
+                column![
+                    text(match self.settings.language {
+                        Language::Es => "RACHA",
+                        Language::En => "STREAK",
+                    })
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+                    canvas,
+                    text(format!("{} / 4", streak % 4))
+                        .size(FONT_TINY)
+                        .color(TEXT_SECONDARY),
+                ]
+                .spacing(SPACE_XS as u16)
+                .align_x(iced::alignment::Horizontal::Center),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+
+        // v1.12.1 — split the previous flat cards row into two rows so
+        // 6 elements fit at the 800 px minimum window. Same approach as
+        // the Focus rewards strip: deterministic layout, no flex-wrap.
+        // Row 1: HOY · DISTRACCIONES · ESTA SEMANA
+        // Row 2: TOTAL · SEMILLAS · streak_ring
+        let cards_row1 = iced::widget::row![
+            card_today,
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            card_distractions,
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            card_week,
+        ];
+        let cards_row2 = iced::widget::row![
+            card_lifetime,
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            card_seeds,
+            iced::widget::Space::with_width(SPACE_MD as f32),
+            streak_ring,
+        ]
+        .align_y(iced::alignment::Vertical::Center);
+        let cards_with_ring = column![cards_row1, cards_row2].spacing(SPACE_MD as u16);
+
         let body = column![
             text(match self.settings.language {
                 Language::Es => "Estadísticas",
@@ -595,8 +791,10 @@ impl App {
             .size(FONT_TITLE)
             .color(TEXT_PRIMARY),
             perm_card,
-            cards,
+            cards_with_ring,
             chart_card,
+            seed_chart_card,
+            seed_ledger_card,
             category_card,
             distractions_card,
             recap_card,
