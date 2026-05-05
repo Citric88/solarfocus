@@ -166,6 +166,9 @@ pub enum Message {
     // v1.8.0 — minimum attention threshold (0-100) for a session to count
     // as valid. 0 means "everything counts".
     SetMinAttention(u8),
+
+    // v1.10.0 — deep study mode toggle. Skips Break phase between sessions.
+    ToggleDeepMode(bool),
 }
 
 

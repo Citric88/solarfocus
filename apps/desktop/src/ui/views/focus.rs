@@ -163,10 +163,28 @@ impl App {
 
         let deadline_badge: Element<'_, Message> = self.deadline_badge();
 
+        // v1.10.0 — solid badge when Deep mode is on. Always visible so the
+        // user knows their break is going to be skipped.
+        let deep_badge: Element<'_, Message> = if self.settings.deep_mode_enabled {
+            crate::ui::components::badge_local(
+                match self.settings.language {
+                    solar_focus_intelligence::Language::Es =>
+                        "🎯 Modo profundo · sin descansos".to_string(),
+                    solar_focus_intelligence::Language::En =>
+                        "🎯 Deep mode · no breaks".to_string(),
+                },
+                crate::ui::components::BadgeVariant::Accent,
+            )
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         let content = column![
             hero,
             iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
             deadline_badge,
+            iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
+            deep_badge,
             iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
             category_picker,
             iced::widget::Space::with_height(Length::Fixed(SPACE_SM as f32)),
