@@ -1,0 +1,36 @@
+# SolarFocus OS plugin example — extra deny-list entries.
+#
+# Drop this file into your plugins folder
+# (~/Library/Application Support/SolarFocus OS/plugins/) and click
+# Recargar in Setup → Plugins. Disable any plugin from the same tab.
+#
+# Plugins are PURE DATA — they cannot execute code. They only extend the
+# rules-based classifier and the seed-reward system.
+
+[metadata]
+name = "Extended distractions"
+version = "0.1.0"
+author = "Gabriel"
+description = "Add a few extra games + social apps to the deny-list."
+
+# Merged on top of the bundled rules.toml + your user override (if any).
+# Same shape as rules.toml: process names match the OS-reported app
+# label exactly (case-insensitive); title_keywords match anywhere in the
+# active window title.
+[classifier_rules.distraction]
+processes = [
+    "Honkai: Star Rail",
+    "Genshin Impact",
+    "Among Us",
+]
+title_keywords = [
+    "twitch.tv",
+    "tiktok.com",
+    "instagram.com/reels",
+]
+
+# Optional: extend the focus allow-list (process names always treated as
+# Focus regardless of title).
+[classifier_rules.focus]
+processes = ["Zed", "Helix", "Tabby"]
+title_keywords = []

@@ -48,6 +48,8 @@ impl App {
                 Language::En => "Privacy",
             }),
             iced::widget::Space::with_width(SPACE_XS as f32),
+            make_tab(SetupTab::Plugins, "Plugins"),
+            iced::widget::Space::with_width(SPACE_XS as f32),
             make_tab(SetupTab::About, match self.settings.language {
                 Language::Es => "Acerca",
                 Language::En => "About",
@@ -59,6 +61,7 @@ impl App {
             SetupTab::General => self.view_setup_general(),
             SetupTab::Ai => self.view_settings(),
             SetupTab::Privacy => self.view_setup_privacy(),
+            SetupTab::Plugins => self.view_setup_plugins(),
             SetupTab::About => self.view_setup_about(),
         };
 

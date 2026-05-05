@@ -10,6 +10,7 @@ pub mod help;
 pub mod setup_about;
 pub mod setup_ai;
 pub mod setup_general;
+pub mod setup_plugins;
 pub mod setup_privacy;
 pub mod setup_tabs;
 pub mod stats;

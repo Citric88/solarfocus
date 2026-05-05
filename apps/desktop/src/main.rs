@@ -178,6 +178,10 @@ pub enum Message {
 
     // v1.10.0 — deep study mode toggle. Skips Break phase between sessions.
     ToggleDeepMode(bool),
+
+    // v1.12.0 — plugin enable/disable + reload from disk.
+    TogglePlugin(String, bool),
+    ReloadPlugins,
 }
 
 
@@ -210,7 +214,11 @@ impl App {
 
         let coach = build_coach(&settings);
         let summarizer = build_summarizer(&settings);
-        let classifier = build_classifier(&settings);
+        // v1.12.0 — scan plugins before building the classifier so its
+        // rules can be folded in before first probe.
+        let plugins = infra::plugins::scan(&settings.plugin_overrides);
+        let classifier =
+            app::builders::build_classifier_with_plugins(&settings, &plugins);
 
         log::info!(
             "v1.3.1 boot — ai_enabled={}, language={:?}, poll={}s, classifier={:?}, coach_ready={}",
@@ -307,6 +315,7 @@ impl App {
                 distractions_today,
                 seeds_total_cache,
                 seeds_awarded_last: 0,
+                plugins,
                 permission_status: PermissionStatus::Unknown,
                 confirming_clear: false,
                 download_active: Arc::new(AtomicBool::new(false)),
