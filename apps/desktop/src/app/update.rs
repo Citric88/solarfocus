@@ -41,6 +41,15 @@ impl App {
                 self.session_started_at_utc = Some(chrono::Utc::now());
 
                 if self.settings.ai_enabled {
+                    if self.is_coach_in_cooldown() {
+                        let msg = solar_focus_intelligence::prompts::coaching_curated(
+                            CoachingTrigger::SessionStart,
+                            &self.focus_context(),
+                        );
+                        self.coach_in_curated_cooldown = true;
+                        return Task::done(Message::CoachingReady(msg));
+                    }
+                    self.coach_in_curated_cooldown = false;
                     let fut =
                         self.coach
                             .coaching_message(CoachingTrigger::SessionStart, &self.focus_context());
@@ -255,6 +264,15 @@ impl App {
                 });
 
                 if self.settings.ai_enabled {
+                    if self.is_coach_in_cooldown() {
+                        let msg = solar_focus_intelligence::prompts::coaching_curated(
+                            CoachingTrigger::SessionComplete,
+                            &self.focus_context(),
+                        );
+                        self.coach_in_curated_cooldown = true;
+                        return Task::done(Message::CoachingReady(msg));
+                    }
+                    self.coach_in_curated_cooldown = false;
                     let fut = self
                         .coach
                         .coaching_message(CoachingTrigger::SessionComplete, &self.focus_context());
@@ -683,7 +701,9 @@ impl App {
                 self.presence_error = None;
                 if on {
                     if self.presence_probe.is_none() {
-                        match infra::presence::PresenceProbe::new() {
+                        match infra::presence::PresenceProbe::new_with_thresholds(
+                            self.settings.face_conf_min,
+                        ) {
                             Ok(p) => {
                                 self.presence_probe = Some(std::sync::Arc::new(p));
                                 log::info!("Presence: probe initialized");
@@ -1084,7 +1104,7 @@ impl App {
             }
             #[cfg(feature = "presence")]
             Message::YoloVerdict(result) => {
-                use crate::infra::presence::PHONE_CONF_MIN;
+                let phone_conf_min = self.settings.phone_conf_min;
                 match result {
                     Ok((score, captured_at)) => {
                         log::info!(
@@ -1096,7 +1116,7 @@ impl App {
                         // Confirmation gate: 2 consecutive ≥ threshold
                         // samples (~10 s at the 5 s YOLO throttle) before
                         // we count it as a real distraction.
-                        if score >= PHONE_CONF_MIN {
+                        if score >= phone_conf_min {
                             self.consecutive_phone_samples =
                                 self.consecutive_phone_samples.saturating_add(1);
                         } else {
@@ -1585,6 +1605,734 @@ impl App {
                 Task::none()
             }
 
+            Message::SetMinConfidence(v) => {
+                self.settings.min_confidence = v.clamp(0.30, 1.0);
+                self.settings.save();
+                Task::none()
+            }
+            Message::SetMinConsecutiveSamples(v) => {
+                self.settings.min_consecutive_samples = v.clamp(1, 5);
+                self.settings.save();
+                Task::none()
+            }
+            Message::SetPresenceAbsentThreshold(v) => {
+                self.settings.presence_absent_threshold = v.clamp(1, 10);
+                self.settings.save();
+                Task::none()
+            }
+            Message::SetPhoneConfMin(v) => {
+                self.settings.phone_conf_min = v.clamp(0.30, 0.80);
+                self.settings.save();
+                Task::none()
+            }
+            Message::SetFaceConfMin(v) => {
+                self.settings.face_conf_min = v.clamp(0.40, 0.90);
+                self.settings.save();
+                // Re-init the presence probe so YuNet picks up the new
+                // threshold without app restart.
+                #[cfg(feature = "presence")]
+                {
+                    if self.settings.presence_enabled {
+                        self.presence_probe = None;
+                        return Task::done(Message::TogglePresence(true));
+                    }
+                }
+                Task::none()
+            }
+            Message::SetCoachCooldownMins(v) => {
+                self.settings.coach_negative_cooldown_mins = v.min(240);
+                self.settings.save();
+                Task::none()
+            }
+
+            Message::TestWindowDetection => {
+                let elapsed = self
+                    .session_started_at
+                    .map(|i| i.elapsed().as_secs() as u32)
+                    .unwrap_or(0);
+                let sample_opt = WindowWatcher::poll(elapsed);
+                if let Some(sample) = sample_opt {
+                    let proc = sample.process_name.clone();
+                    let fut = self.classifier.classify(&sample);
+                    return Task::perform(fut, move |r| match r {
+                        Ok(c) => Message::WindowTestReady(Some((
+                            proc.clone(),
+                            c.matched_rule.clone(),
+                            c.confidence,
+                            c.label,
+                        ))),
+                        Err(_) => Message::WindowTestReady(None),
+                    });
+                }
+                Task::done(Message::WindowTestReady(None))
+            }
+            Message::WindowTestReady(opt) => {
+                self.last_window_test = opt;
+                Task::none()
+            }
+
+            #[cfg(feature = "presence")]
+            Message::TestFaceDetection => {
+                if let Some(probe) = self.presence_probe.as_ref() {
+                    let probe = probe.clone();
+                    if let Some(engine) = probe.yunet_engine() {
+                        match probe.poll() {
+                            Ok((_sample, captured)) => {
+                                let bytes = captured.bytes;
+                                let (w, h) = (captured.width, captured.height);
+                                return Task::perform(
+                                    async move {
+                                        tokio::task::spawn_blocking(move || {
+                                            let mut g = engine
+                                                .lock()
+                                                .map_err(|_| "yunet poisoned".to_string())?;
+                                            g.infer(&bytes, w, h)
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|r| r)
+                                    },
+                                    Message::FaceTestReady,
+                                );
+                            }
+                            Err(e) => return Task::done(Message::FaceTestReady(Err(e.to_string()))),
+                        }
+                    }
+                    return Task::done(Message::FaceTestReady(Err("YuNet no descargado".to_string())));
+                }
+                Task::done(Message::FaceTestReady(Err(
+                    "Activa la cámara primero".to_string(),
+                )))
+            }
+            #[cfg(feature = "presence")]
+            Message::FaceTestReady(result) => {
+                self.last_face_test = result.ok();
+                Task::none()
+            }
+
+            #[cfg(feature = "presence")]
+            Message::TestPhoneDetection => {
+                if let Some(probe) = self.presence_probe.as_ref() {
+                    let probe = probe.clone();
+                    if let Some(engine) = probe.yolo_engine() {
+                        match probe.poll() {
+                            Ok((_sample, captured)) => {
+                                let bytes = captured.bytes;
+                                let (w, h) = (captured.width, captured.height);
+                                return Task::perform(
+                                    async move {
+                                        tokio::task::spawn_blocking(move || {
+                                            let mut g = engine
+                                                .lock()
+                                                .map_err(|_| "yolo poisoned".to_string())?;
+                                            g.infer(&bytes, w, h)
+                                        })
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|r| r)
+                                    },
+                                    Message::PhoneTestReady,
+                                );
+                            }
+                            Err(e) => return Task::done(Message::PhoneTestReady(Err(e.to_string()))),
+                        }
+                    }
+                    return Task::done(Message::PhoneTestReady(Err(
+                        "YOLOv8n no descargado".to_string(),
+                    )));
+                }
+                Task::done(Message::PhoneTestReady(Err(
+                    "Activa la cámara primero".to_string(),
+                )))
+            }
+            #[cfg(feature = "presence")]
+            Message::PhoneTestReady(result) => {
+                self.last_phone_test = result.ok();
+                Task::none()
+            }
+
+            Message::StartCalibrationWizard => {
+                self.calibration_wizard = Some(crate::app::state::CalibrationWizardState::default());
+                Task::none()
+            }
+            Message::CalibrationWizardCancel => {
+                self.calibration_wizard = None;
+                Task::none()
+            }
+            #[cfg(not(feature = "presence"))]
+            Message::CalibrationCapture => Task::none(),
+            #[cfg(feature = "presence")]
+            Message::CalibrationCapture => {
+                // The capture loop runs on the UI thread (one frame per
+                // tick) because PresenceProbe wraps a non-Send Camera.
+                // Each frame: poll on UI (~5ms), inference in
+                // spawn_blocking (~200ms), then schedule the next.
+                use crate::app::state::CalibrationStage;
+                let stage = match self.calibration_wizard.as_ref().map(|w| w.stage) {
+                    Some(s) => s,
+                    None => return Task::none(),
+                };
+                // v1.13.0 — "Empezar" on the Welcome stage just
+                // transitions to FaceWith and waits for the user to
+                // click Capturar there. Without this the click did
+                // nothing because the capture path below only handles
+                // the four data stages.
+                if matches!(stage, CalibrationStage::Welcome) {
+                    if let Some(w) = self.calibration_wizard.as_mut() {
+                        w.stage = CalibrationStage::FaceWith;
+                    }
+                    return Task::none();
+                }
+                let want_face = matches!(
+                    stage,
+                    CalibrationStage::FaceWith | CalibrationStage::FaceWithout
+                );
+                let want_phone = matches!(
+                    stage,
+                    CalibrationStage::PhoneWith | CalibrationStage::PhoneWithout
+                );
+                if !want_face && !want_phone {
+                    return Task::none();
+                }
+                let probe = match self.presence_probe.as_ref() {
+                    Some(p) => p.clone(),
+                    None => {
+                        self.toast = Some(Toast {
+                            text: match self.settings.language {
+                                Language::Es => "Activa la cámara primero (Setup → IA).".to_string(),
+                                Language::En => "Enable the camera first (Setup → IA).".to_string(),
+                            },
+                            expires_at: Instant::now() + Duration::from_secs(4),
+                        });
+                        return Task::none();
+                    }
+                };
+                // Only reset the bucket on the first click of the batch
+                // (capturing == false). Subsequent recursive entries via
+                // CalibrationFrameReady → CalibrationCapture must keep
+                // their accumulated frames, otherwise the batch never
+                // reaches the 10-frame target and the UI stays stuck on
+                // "Capturando…".
+                let already_capturing = self
+                    .calibration_wizard
+                    .as_ref()
+                    .map(|w| w.capturing)
+                    .unwrap_or(false);
+                if let Some(w) = self.calibration_wizard.as_mut() {
+                    if !already_capturing {
+                        // Fresh batch (user click): clear bucket AND
+                        // dismiss any stale warning from the previous
+                        // batch so the UI flips to "Capturando…"
+                        // immediately. Without this clear the primary
+                        // button stays as "Reintentar este paso" while
+                        // the new capture runs silently underneath, and
+                        // each extra click spawns a parallel batch.
+                        w.stage_warning = None;
+                        match stage {
+                            CalibrationStage::FaceWith => w.face_with.clear(),
+                            CalibrationStage::FaceWithout => w.face_without.clear(),
+                            CalibrationStage::PhoneWith => w.phone_with.clear(),
+                            CalibrationStage::PhoneWithout => w.phone_without.clear(),
+                            _ => {}
+                        }
+                    }
+                    w.capturing = true;
+                }
+                // Capture frame 1 of 10 right now; the rest schedule
+                // themselves via CalibrationFrameReady → CalibrationCaptureNext.
+                let captured_opt = probe.poll().ok().map(|(_, c)| c);
+                let captured = match captured_opt {
+                    Some(c) => c,
+                    None => return Task::done(Message::CalibrationFrameReady(stage, 0.0)),
+                };
+                let bytes = captured.bytes;
+                let (w, h) = (captured.width, captured.height);
+                if want_face {
+                    if let Some(engine) = probe.yunet_engine() {
+                        return Task::perform(
+                            async move {
+                                let res = tokio::task::spawn_blocking(move || {
+                                    engine
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut g| g.infer(&bytes, w, h).ok().map(|(_, s)| s))
+                                })
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0.0);
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                res
+                            },
+                            move |s| Message::CalibrationFrameReady(stage, s),
+                        );
+                    }
+                } else if let Some(engine) = probe.yolo_engine() {
+                    return Task::perform(
+                        async move {
+                            let res = tokio::task::spawn_blocking(move || {
+                                engine
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut g| g.infer(&bytes, w, h).ok())
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0.0);
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            res
+                        },
+                        move |s| Message::CalibrationFrameReady(stage, s),
+                    );
+                }
+                Task::done(Message::CalibrationFrameReady(stage, 0.0))
+            }
+            #[cfg(feature = "presence")]
+            Message::CalibrationFrameReady(stage, score) => {
+                use crate::app::state::CalibrationStage;
+                const TARGET: usize = 10;
+                let mut done_n = 0;
+                if let Some(w) = self.calibration_wizard.as_mut() {
+                    let bucket = match stage {
+                        CalibrationStage::FaceWith => &mut w.face_with,
+                        CalibrationStage::FaceWithout => &mut w.face_without,
+                        CalibrationStage::PhoneWith => &mut w.phone_with,
+                        CalibrationStage::PhoneWithout => &mut w.phone_without,
+                        _ => return Task::none(),
+                    };
+                    bucket.push(score);
+                    done_n = bucket.len();
+                }
+                if done_n < TARGET {
+                    // Still need more frames — fire the next capture.
+                    return Task::done(Message::CalibrationCapture);
+                }
+                // 10 frames collected — wrap up this stage.
+                let scores: Vec<f32> = match self.calibration_wizard.as_ref() {
+                    Some(w) => match stage {
+                        CalibrationStage::FaceWith => w.face_with.clone(),
+                        CalibrationStage::FaceWithout => w.face_without.clone(),
+                        CalibrationStage::PhoneWith => w.phone_with.clone(),
+                        CalibrationStage::PhoneWithout => w.phone_without.clone(),
+                        _ => return Task::none(),
+                    },
+                    None => return Task::none(),
+                };
+                Task::done(Message::CalibrationBatchReady(stage, scores))
+            }
+            #[cfg(feature = "presence")]
+            Message::CalibrationBatchReady(stage, scores) => {
+                use crate::app::state::CalibrationStage;
+                // v1.13.0 — proactive per-stage diagnostics. Compute
+                // statistics on the just-arrived batch and decide
+                // whether to (a) advance silently, (b) advance with a
+                // warning the Summary will surface, or (c) PAUSE on
+                // this stage and ask the user to retry this step
+                // specifically.
+                let mean: f32 = if scores.is_empty() {
+                    0.0
+                } else {
+                    scores.iter().sum::<f32>() / scores.len() as f32
+                };
+                let max: f32 = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let warning: Option<String> = match stage {
+                    CalibrationStage::FaceWith => {
+                        if max < 0.10 {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "🚨 Casi no detecté tu cara (max={:.2}). Verifica que estás frente a la cámara, que hay buena luz, y que la cámara no está bloqueada. Pulsa Reintentar este paso o Continuar de todos modos.",
+                                    max
+                                ),
+                                Language::En => format!(
+                                    "🚨 Barely detected your face (max={:.2}). Make sure you're in frame, lighting is decent, and the camera isn't blocked. Press Retry this step or Continue anyway.",
+                                    max
+                                ),
+                            })
+                        } else if mean < 0.20 {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "⚠ Detección débil (media={:.2}). Para mejor calibración: acerca la cámara a tu cara o mejora la iluminación. ¿Reintentar?",
+                                    mean
+                                ),
+                                Language::En => format!(
+                                    "⚠ Weak detection (mean={:.2}). For better calibration: move closer or improve lighting. Retry?",
+                                    mean
+                                ),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    CalibrationStage::FaceWithout => {
+                        // Cross-validation: compare against the previous
+                        // FaceWith batch. Catches the "low light + dark
+                        // background" failure mode where with/without
+                        // distributions overlap heavily.
+                        let prev_with = self
+                            .calibration_wizard
+                            .as_ref()
+                            .map(|w| w.face_with.clone())
+                            .unwrap_or_default();
+                        let mean_with: f32 = if prev_with.is_empty() {
+                            0.0
+                        } else {
+                            prev_with.iter().sum::<f32>() / prev_with.len() as f32
+                        };
+                        let max_without = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        if mean > 0.30 {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "⚠ Aún detecto algo (media={:.2}) cuando se supone que no hay cara. Asegúrate de cubrir la cámara o salir del cuadro completamente. ¿Reintentar?",
+                                    mean
+                                ),
+                                Language::En => format!(
+                                    "⚠ Still detecting something (mean={:.2}) when there should be no face. Make sure you cover the camera or fully step out of frame. Retry?",
+                                    mean
+                                ),
+                            })
+                        } else if max_without >= mean_with && mean_with > 0.0 {
+                            // Overlap detected: noise without face is as
+                            // strong as signal with face → no threshold
+                            // can separate them.
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "🚨 Solapamiento total detectado: el modelo ve 'caras' fantasma (max sin cara = {:.2}) tan fuertes como cuando estás presente (media con cara = {:.2}). Causa probable: poca luz o fondo ruidoso. Mejora la iluminación frontal y reintenta el paso. O Continúa de todos modos para ver el resumen.",
+                                    max_without, mean_with
+                                ),
+                                Language::En => format!(
+                                    "🚨 Total overlap detected: the model sees ghost 'faces' (max without face = {:.2}) as strongly as your real face (mean with face = {:.2}). Likely cause: low light or noisy background. Improve frontal lighting and retry this step. Or Continue anyway to see the summary.",
+                                    max_without, mean_with
+                                ),
+                            })
+                        } else if mean_with > 0.0 && mean_with < 2.5 * mean.max(0.01) {
+                            // Weak ratio between with and without.
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "⚠ Diferencia débil entre con/sin cara (con={:.2} vs sin={:.2}). El umbral resultante será frágil. Considera mejorar la iluminación y reintentar.",
+                                    mean_with, mean
+                                ),
+                                Language::En => format!(
+                                    "⚠ Weak ratio between with/without face (with={:.2} vs without={:.2}). The resulting threshold will be fragile. Consider improving lighting and retrying.",
+                                    mean_with, mean
+                                ),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    CalibrationStage::PhoneWith => {
+                        if max < 0.10 {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "🚨 No detecté tu celular (max={:.2}). Levántalo bien al frente de la cámara, asegúrate que ocupe parte significativa del cuadro, y que esté bien iluminado. ¿Reintentar?",
+                                    max
+                                ),
+                                Language::En => format!(
+                                    "🚨 Couldn't detect your phone (max={:.2}). Hold it clearly in front of the camera, make sure it fills a meaningful part of the frame, and is well-lit. Retry?",
+                                    max
+                                ),
+                            })
+                        } else if mean < 0.20 {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "⚠ Detección débil del celular (media={:.2}). Acércalo más o ajusta el ángulo. ¿Reintentar?",
+                                    mean
+                                ),
+                                Language::En => format!(
+                                    "⚠ Weak phone detection (mean={:.2}). Hold it closer or adjust the angle. Retry?",
+                                    mean
+                                ),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    CalibrationStage::PhoneWithout => {
+                        let prev_with = self
+                            .calibration_wizard
+                            .as_ref()
+                            .map(|w| w.phone_with.clone())
+                            .unwrap_or_default();
+                        let mean_with: f32 = if prev_with.is_empty() {
+                            0.0
+                        } else {
+                            prev_with.iter().sum::<f32>() / prev_with.len() as f32
+                        };
+                        let max_without = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        if mean > 0.30 {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "⚠ Aún detecto un objeto similar a celular (media={:.2}). Quita cualquier teléfono u objeto rectangular del cuadro. ¿Reintentar?",
+                                    mean
+                                ),
+                                Language::En => format!(
+                                    "⚠ Still detecting something phone-like (mean={:.2}). Remove any phone or rectangular object from the frame. Retry?",
+                                    mean
+                                ),
+                            })
+                        } else if max_without >= mean_with && mean_with > 0.0 {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "🚨 Solapamiento total: el modelo confunde el fondo con un celular (max sin = {:.2}) tan fuerte como cuando lo muestras (media con = {:.2}). Probable causa: poca luz o el celular era pequeño en el cuadro. Acércalo más y mejora la iluminación.",
+                                    max_without, mean_with
+                                ),
+                                Language::En => format!(
+                                    "🚨 Total overlap: the model confuses the background with a phone (max without = {:.2}) as strongly as when you showed it (mean with = {:.2}). Likely cause: low light or phone too small in frame. Hold it closer and improve lighting.",
+                                    max_without, mean_with
+                                ),
+                            })
+                        } else if mean_with > 0.0 && mean_with < 2.5 * mean.max(0.01) {
+                            Some(match self.settings.language {
+                                Language::Es => format!(
+                                    "⚠ Diferencia débil entre con/sin celular (con={:.2} vs sin={:.2}). El umbral resultante será frágil. Considera acercar el celular o mejorar la luz.",
+                                    mean_with, mean
+                                ),
+                                Language::En => format!(
+                                    "⚠ Weak ratio between with/without phone (with={:.2} vs without={:.2}). The resulting threshold will be fragile. Hold the phone closer or improve lighting.",
+                                    mean_with, mean
+                                ),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(w) = self.calibration_wizard.as_mut() {
+                    w.capturing = false;
+                    // Always store the scores even if we pause for warning —
+                    // the user might choose to continue with imperfect data.
+                    match stage {
+                        CalibrationStage::FaceWith => w.face_with = scores.clone(),
+                        CalibrationStage::FaceWithout => w.face_without = scores.clone(),
+                        CalibrationStage::PhoneWith => w.phone_with = scores.clone(),
+                        CalibrationStage::PhoneWithout => w.phone_without = scores.clone(),
+                        _ => {}
+                    }
+                    if let Some(msg) = warning {
+                        // PAUSE on this stage; user picks Reintentar or Continuar.
+                        w.stage_warning = Some(msg);
+                        return Task::none();
+                    }
+                    w.stage_warning = None;
+                    match stage {
+                        CalibrationStage::FaceWith => {
+                            w.stage = CalibrationStage::FaceWithout;
+                        }
+                        CalibrationStage::FaceWithout => {
+                            w.stage = CalibrationStage::PhoneWith;
+                        }
+                        CalibrationStage::PhoneWith => {
+                            w.stage = CalibrationStage::PhoneWithout;
+                        }
+                        CalibrationStage::PhoneWithout => {
+                            // scores already stored above; compute outcomes.
+                            let face = compute_suggested_outcome(
+                                &w.face_with,
+                                &w.face_without,
+                            );
+                            let phone = compute_suggested_outcome(
+                                &w.phone_with,
+                                &w.phone_without,
+                            );
+                            let q_label = |q| match q {
+                                CalibrationQuality::Strong => "strong".to_string(),
+                                CalibrationQuality::Marginal => "marginal".to_string(),
+                                CalibrationQuality::Unusable => "unusable".to_string(),
+                                CalibrationQuality::Insufficient => "insufficient".to_string(),
+                            };
+                            w.suggested_face = face.threshold;
+                            w.face_marginal =
+                                matches!(face.quality, CalibrationQuality::Marginal);
+                            w.face_quality = Some((
+                                q_label(face.quality),
+                                (face.error_rate * 100.0).round() as u32,
+                                face.overlap,
+                                face.mean_with,
+                                face.mean_without,
+                            ));
+                            w.suggested_phone = phone.threshold;
+                            w.phone_marginal =
+                                matches!(phone.quality, CalibrationQuality::Marginal);
+                            w.phone_quality = Some((
+                                q_label(phone.quality),
+                                (phone.error_rate * 100.0).round() as u32,
+                                phone.overlap,
+                                phone.mean_with,
+                                phone.mean_without,
+                            ));
+                            w.stage = CalibrationStage::Summary;
+                        }
+                        _ => {}
+                    }
+                }
+                Task::none()
+            }
+            Message::CalibrationContinueAnyway => {
+                // Clear the warning and force-advance to the next stage,
+                // re-using the same dispatch logic as CalibrationBatchReady.
+                use crate::app::state::CalibrationStage;
+                if let Some(w) = self.calibration_wizard.as_mut() {
+                    w.stage_warning = None;
+                    w.stage = match w.stage {
+                        CalibrationStage::FaceWith => CalibrationStage::FaceWithout,
+                        CalibrationStage::FaceWithout => CalibrationStage::PhoneWith,
+                        CalibrationStage::PhoneWith => CalibrationStage::PhoneWithout,
+                        CalibrationStage::PhoneWithout => CalibrationStage::Summary,
+                        other => other,
+                    };
+                    if matches!(w.stage, CalibrationStage::Summary) {
+                        let face = compute_suggested_outcome(
+                            &w.face_with,
+                            &w.face_without,
+                        );
+                        let phone = compute_suggested_outcome(
+                            &w.phone_with,
+                            &w.phone_without,
+                        );
+                        let q_label = |q| match q {
+                            CalibrationQuality::Strong => "strong".to_string(),
+                            CalibrationQuality::Marginal => "marginal".to_string(),
+                            CalibrationQuality::Unusable => "unusable".to_string(),
+                            CalibrationQuality::Insufficient => "insufficient".to_string(),
+                        };
+                        w.suggested_face = face.threshold;
+                        w.face_marginal = matches!(face.quality, CalibrationQuality::Marginal);
+                        w.face_quality = Some((
+                            q_label(face.quality),
+                            (face.error_rate * 100.0).round() as u32,
+                            face.overlap,
+                            face.mean_with,
+                            face.mean_without,
+                        ));
+                        w.suggested_phone = phone.threshold;
+                        w.phone_marginal = matches!(phone.quality, CalibrationQuality::Marginal);
+                        w.phone_quality = Some((
+                            q_label(phone.quality),
+                            (phone.error_rate * 100.0).round() as u32,
+                            phone.overlap,
+                            phone.mean_with,
+                            phone.mean_without,
+                        ));
+                    }
+                }
+                Task::none()
+            }
+            Message::CalibrationApply => {
+                // v1.13.0 — only apply per-detector if quality is NOT
+                // 'unusable'. A high error rate or zero-mean detection
+                // means the threshold would brick the feature (e.g.
+                // YOLO=0.00 → every frame fires phone-detected). Skip
+                // those silently and toast only what was applied.
+                let (face, phone, face_q, phone_q) = match self.calibration_wizard.as_ref() {
+                    Some(w) => (
+                        w.suggested_face,
+                        w.suggested_phone,
+                        w.face_quality.clone(),
+                        w.phone_quality.clone(),
+                    ),
+                    None => return Task::none(),
+                };
+                let mut applied = Vec::new();
+                let mut skipped = Vec::new();
+                if let Some(v) = face {
+                    let unusable = face_q.as_ref().map(|(q, ..)| q == "unusable").unwrap_or(false);
+                    if unusable {
+                        skipped.push("YuNet".to_string());
+                    } else if v < 0.05 {
+                        // Floor: anything below 0.05 effectively means
+                        // "always present" — refuse silently.
+                        skipped.push("YuNet".to_string());
+                    } else {
+                        self.settings.face_conf_min = v.clamp(0.40, 0.90);
+                        applied.push(format!("YuNet → {:.2}", v));
+                    }
+                }
+                if let Some(v) = phone {
+                    let unusable = phone_q.as_ref().map(|(q, ..)| q == "unusable").unwrap_or(false);
+                    if unusable {
+                        skipped.push("YOLO".to_string());
+                    } else if v < 0.05 {
+                        // Floor: a phone threshold near zero would
+                        // auto-pause the session every tick.
+                        skipped.push("YOLO".to_string());
+                    } else {
+                        self.settings.phone_conf_min = v.clamp(0.30, 0.80);
+                        applied.push(format!("YOLO → {:.2}", v));
+                    }
+                }
+                self.settings.save();
+                self.calibration_wizard = None;
+                let toast_text = if applied.is_empty() {
+                    match self.settings.language {
+                        Language::Es =>
+                            "Sin separación suficiente. Defaults preservados.".to_string(),
+                        Language::En =>
+                            "Insufficient separation. Defaults kept.".to_string(),
+                    }
+                } else {
+                    match self.settings.language {
+                        Language::Es =>
+                            format!("Aplicado: {}", applied.join(" · ")),
+                        Language::En => format!("Applied: {}", applied.join(" · ")),
+                    }
+                };
+                self.toast = Some(Toast {
+                    text: toast_text,
+                    expires_at: Instant::now() + Duration::from_secs(6),
+                });
+                #[cfg(feature = "presence")]
+                {
+                    if self.settings.presence_enabled {
+                        self.presence_probe = None;
+                        return Task::done(Message::TogglePresence(true));
+                    }
+                }
+                Task::none()
+            }
+
+            Message::MarkLastDistractionAsFalsePositive => {
+                let process: Option<String> = self
+                    .session_repo
+                    .as_ref()
+                    .and_then(|r| r.recent_distraction_process().ok().flatten());
+                let proc_name = match process {
+                    Some(p) => p,
+                    None => {
+                        self.toast = Some(Toast {
+                            text: match self.settings.language {
+                                Language::Es => "Sin distracciones recientes para marcar.".to_string(),
+                                Language::En => "No recent distractions to mark.".to_string(),
+                            },
+                            expires_at: Instant::now() + Duration::from_secs(4),
+                        });
+                        return Task::none();
+                    }
+                };
+                let result =
+                    crate::infra::plugins::append_to_user_exceptions(&proc_name);
+                let toast_text = match (&result, self.settings.language) {
+                    (Ok(_), Language::Es) => format!("'{proc_name}' añadido a excepciones."),
+                    (Ok(_), Language::En) => format!("'{proc_name}' added to exceptions."),
+                    (Err(e), Language::Es) => format!("Error: {e}"),
+                    (Err(e), Language::En) => format!("Error: {e}"),
+                };
+                self.toast = Some(Toast {
+                    text: toast_text,
+                    expires_at: Instant::now() + Duration::from_secs(5),
+                });
+                self.plugins =
+                    crate::infra::plugins::scan(&self.settings.plugin_overrides);
+                self.classifier =
+                    crate::app::builders::build_classifier_with_plugins(
+                        &self.settings,
+                        &self.plugins,
+                    );
+                Task::none()
+            }
+
             Message::SetMinAttention(value) => {
                 let clamped = value.min(100);
                 self.settings.min_attention_for_valid_session = clamped;
@@ -1656,6 +2404,20 @@ impl App {
         }
     }
 
+    /// v1.13.0 — true if the user voted 👎 on a coach message within
+    /// `settings.coach_negative_cooldown_mins`. While true, the next
+    /// coach call bypasses the LLM and pulls from the curated bank.
+    fn is_coach_in_cooldown(&self) -> bool {
+        let mins = self.settings.coach_negative_cooldown_mins;
+        if mins == 0 {
+            return false;
+        }
+        self.session_repo
+            .as_ref()
+            .and_then(|r| r.recent_negative_feedback_within(mins).ok())
+            .unwrap_or(false)
+    }
+
     /// v1.12.2 — common export feedback. Saves the path on App so the
     /// Privacy card can show it inline (the toast only renders on the
     /// Focus canvas), reveals the file in macOS Finder so the user
@@ -1697,4 +2459,132 @@ impl App {
             }
         }
     }
+}
+
+/// v1.13.0 — calibration analysis output. Reports the optimal
+/// threshold (minimising classification error on the captured
+/// samples), the expected error rate at that threshold, and a
+/// quality classification so the UI can render an actionable
+/// recommendation instead of a vague "marginal" badge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub enum CalibrationQuality {
+    /// Distributions cleanly separated; suggested threshold is
+    /// confident.
+    Strong,
+    /// Distributions overlap a little; threshold has measurable
+    /// error rate but is still useful.
+    Marginal,
+    /// Distributions overlap heavily; no threshold can reliably
+    /// separate them. Don't apply — recommend disabling presence
+    /// detection or repositioning.
+    Unusable,
+    /// Not enough data (< 3 samples in either set).
+    Insufficient,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct CalibrationOutcome {
+    pub threshold: Option<f32>,
+    pub quality: CalibrationQuality,
+    /// Expected misclassification rate at the chosen threshold,
+    /// computed against the captured samples themselves. 0..1.
+    pub error_rate: f32,
+    /// True if max(without) >= min(with) — i.e. the two clouds
+    /// overlap, which is the dominant failure mode for the user's
+    /// camera angle / lighting / model fit.
+    pub overlap: bool,
+    pub mean_with: f32,
+    pub mean_without: f32,
+}
+
+/// v1.13.0 — find the threshold on `[0..1]` that minimises the
+/// total classification error against the captured samples:
+/// `false_positives = |without ≥ T|` (claims presence when absent)
+/// + `false_negatives = |with < T|` (claims absent when present).
+/// Returns the best `(threshold, error_rate)` pair.
+fn scan_optimal_threshold(with: &[f32], without: &[f32]) -> (f32, f32) {
+    // Build a sorted list of candidate thresholds: every observed
+    // score acts as a boundary, plus 0.0 and 1.0.
+    let mut candidates: Vec<f32> = with.iter().copied().chain(without.iter().copied()).collect();
+    candidates.push(0.0);
+    candidates.push(1.0);
+    candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+    let n = (with.len() + without.len()) as f32;
+    let mut best_t = 0.5_f32;
+    let mut best_err = f32::INFINITY;
+
+    for t in &candidates {
+        let fp = without.iter().filter(|&&s| s >= *t).count() as f32;
+        let fn_ = with.iter().filter(|&&s| s < *t).count() as f32;
+        let err = (fp + fn_) / n;
+        if err < best_err {
+            best_err = err;
+            best_t = *t;
+        }
+    }
+    (best_t.clamp(0.0, 1.0), best_err)
+}
+
+/// v1.13.0 — derive a suggested threshold + quality verdict from two
+/// contrastive score samples. Replaces the v1.13.0-pre naive midpoint
+/// approach with an error-minimisation scan that produces honest
+/// quality + error-rate readouts the UI can render.
+#[allow(dead_code)]
+pub(crate) fn compute_suggested_outcome(
+    with: &[f32],
+    without: &[f32],
+) -> CalibrationOutcome {
+    if with.len() < 3 || without.len() < 3 {
+        return CalibrationOutcome {
+            threshold: None,
+            quality: CalibrationQuality::Insufficient,
+            error_rate: 0.0,
+            overlap: false,
+            mean_with: 0.0,
+            mean_without: 0.0,
+        };
+    }
+    let mean = |xs: &[f32]| xs.iter().sum::<f32>() / xs.len() as f32;
+    let m_with = mean(with);
+    let m_without = mean(without);
+    let max_without = without.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let min_with = with.iter().copied().fold(f32::INFINITY, f32::min);
+    let overlap = max_without >= min_with;
+
+    let (t, err) = scan_optimal_threshold(with, without);
+
+    let quality = if err <= 0.05 {
+        CalibrationQuality::Strong
+    } else if err <= 0.20 {
+        CalibrationQuality::Marginal
+    } else {
+        CalibrationQuality::Unusable
+    };
+
+    let threshold = match quality {
+        CalibrationQuality::Strong | CalibrationQuality::Marginal => Some(t),
+        CalibrationQuality::Unusable | CalibrationQuality::Insufficient => None,
+    };
+
+    CalibrationOutcome {
+        threshold,
+        quality,
+        error_rate: err,
+        overlap,
+        mean_with: m_with,
+        mean_without: m_without,
+    }
+}
+
+/// v1.13.0 (legacy) — kept for compile compatibility with older call
+/// sites. Returns `(Option<threshold>, marginal_flag)`.
+#[allow(dead_code)]
+pub(crate) fn compute_suggested(with: &[f32], without: &[f32]) -> (Option<f32>, bool) {
+    let outcome = compute_suggested_outcome(with, without);
+    let marginal = matches!(outcome.quality, CalibrationQuality::Marginal);
+    (outcome.threshold, marginal)
 }

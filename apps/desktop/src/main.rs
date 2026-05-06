@@ -187,6 +187,45 @@ pub enum Message {
     // v1.12.0 — plugin enable/disable + reload from disk.
     TogglePlugin(String, bool),
     ReloadPlugins,
+
+    // v1.13.0 — Calibración sliders. Each persists to settings.json
+    // and (where applicable) re-initialises the presence probe.
+    SetMinConfidence(f32),
+    SetMinConsecutiveSamples(u8),
+    SetPresenceAbsentThreshold(u8),
+    SetPhoneConfMin(f32),
+    SetFaceConfMin(f32),
+    SetCoachCooldownMins(u32),
+
+    // v1.13.0 — "Probar detección ahora" actions + their async results.
+    TestWindowDetection,
+    WindowTestReady(Option<(String, Option<String>, f32, ClassificationLabel)>),
+    #[cfg(feature = "presence")]
+    TestFaceDetection,
+    #[cfg(feature = "presence")]
+    FaceTestReady(Result<(infra::presence::Presence, f32), String>),
+    #[cfg(feature = "presence")]
+    TestPhoneDetection,
+    #[cfg(feature = "presence")]
+    PhoneTestReady(Result<f32, String>),
+
+    // v1.13.0 — false positive: append the most recent distraction's
+    // process to the auto-generated user exceptions plugin.
+    MarkLastDistractionAsFalsePositive,
+
+    // v1.13.0 — guided calibration wizard.
+    StartCalibrationWizard,
+    CalibrationWizardCancel,
+    CalibrationCapture,
+    #[cfg(feature = "presence")]
+    CalibrationBatchReady(app::state::CalibrationStage, Vec<f32>),
+    #[cfg(feature = "presence")]
+    CalibrationFrameReady(app::state::CalibrationStage, f32),
+    CalibrationApply,
+    /// v1.13.0 — dismiss the per-stage warning and force the wizard
+    /// to advance to the next stage with the (sub-par) data already
+    /// captured. The Summary will surface the quality issue anyway.
+    CalibrationContinueAnyway,
 }
 
 
@@ -322,6 +361,13 @@ impl App {
                 seeds_awarded_last: 0,
                 last_export_path: None,
                 last_export_error: None,
+                last_window_test: None,
+                #[cfg(feature = "presence")]
+                last_face_test: None,
+                #[cfg(feature = "presence")]
+                last_phone_test: None,
+                coach_in_curated_cooldown: false,
+                calibration_wizard: None,
                 plugins,
                 permission_status: PermissionStatus::Unknown,
                 confirming_clear: false,

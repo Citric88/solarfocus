@@ -203,6 +203,46 @@ pub fn seed_bonus_for_category(plugins: &[Plugin], category: &str) -> u32 {
         .sum()
 }
 
+/// v1.13.0 — append a process to the auto-generated user exceptions
+/// plugin. Creates `excepciones-usuario.toml` if missing; appends to
+/// the focus allowlist when the process isn't already there.
+pub fn append_to_user_exceptions(process: &str) -> Result<PathBuf, String> {
+    let dir = plugins_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("excepciones-usuario.toml");
+    let mut file: PluginFile = if path.exists() {
+        let body = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        toml::from_str(&body).unwrap_or_default()
+    } else {
+        PluginFile {
+            metadata: PluginMetadata {
+                name: "Excepciones del usuario".to_string(),
+                version: "auto".to_string(),
+                author: "(auto-generated)".to_string(),
+                description:
+                    "Procesos marcados como falso positivo desde la app — añadidos a la allowlist."
+                        .to_string(),
+            },
+            classifier_rules: Some(ClassifierRulesBody::default()),
+            seed_rules: SeedRules::default(),
+        }
+    };
+    let rules = file
+        .classifier_rules
+        .get_or_insert_with(ClassifierRulesBody::default);
+    let already = rules
+        .focus
+        .processes
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(process));
+    if !already {
+        rules.focus.processes.push(process.to_string());
+    }
+    let serialized = toml::to_string(&file).map_err(|e| e.to_string())?;
+    std::fs::write(&path, serialized).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 fn render_classifier_toml(rules: &ClassifierRulesBody) -> String {
     fn quote_list(xs: &[String]) -> String {
         xs.iter()
