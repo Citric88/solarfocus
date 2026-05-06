@@ -260,6 +260,37 @@ impl SessionRepository {
         }
     }
 
+    /// v1.13.0 — return the process name from the most recent
+    /// distraction event, or None if the table is empty. Powers the
+    /// "Marcar como falso positivo" button on the Focus toast.
+    pub fn recent_distraction_process(&self) -> SqlResult<Option<String>> {
+        let row = self.conn.query_row(
+            "SELECT process_name FROM distraction_events ORDER BY at DESC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        );
+        match row {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// v1.13.0 — true if any thumbs-down feedback was saved within the
+    /// last `mins` minutes. Powers the cooldown that bypasses the LLM
+    /// in favour of the curated bank.
+    pub fn recent_negative_feedback_within(&self, mins: u32) -> SqlResult<bool> {
+        if mins == 0 {
+            return Ok(false);
+        }
+        let sql = format!(
+            "SELECT 1 FROM coaching_feedback WHERE rating < 0 \
+             AND created_at >= datetime('now', '-{mins} minutes') LIMIT 1"
+        );
+        let count: i64 = self.conn.query_row(&sql, [], |r| r.get(0)).unwrap_or(0);
+        Ok(count > 0)
+    }
+
     /// v1.4.0 — log a confirmed distraction event.
     pub fn save_distraction(
         &self,

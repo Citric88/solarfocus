@@ -1,6 +1,6 @@
 [package]
 name = "solarfocus-desktop"
-version = "1.12.2"
+version = "1.13.0"
 edition = "2021"
 
 [dependencies]
@@ -20,7 +20,7 @@ solar-focus-intelligence = { path = "../../crates/intelligence" }
 thiserror = "1"
 # v1.12.0 — TOML plugin loader. Same crate the intelligence rules
 # parser uses; pulled in directly here so plugins ships in default build.
-toml = { version = "0.8", default-features = false, features = ["parse"] }
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 
 # Phase 3 — LLM tier (feature-gated)
 llama-cpp-2 = { workspace = true, optional = true }

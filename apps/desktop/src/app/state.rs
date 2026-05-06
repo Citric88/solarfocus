@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use solar_focus_intelligence::{
-    ClassificationResult, Coach, DistractionClassifier, Summarizer,
+    ClassificationLabel, ClassificationResult, Coach, DistractionClassifier, Summarizer,
 };
 use solar_focus_core::focus_rules::FocusRulesEngine;
 
@@ -26,6 +26,7 @@ use crate::infra;
 pub enum SetupTab {
     General,
     Ai,
+    Calibration,
     Privacy,
     Plugins,
     About,
@@ -42,6 +43,60 @@ pub enum WizardStep {
     Profile,
     Download,
     Done,
+}
+
+/// v1.13.0 — guided calibration wizard. Captures 10 frames per stage,
+/// runs the matching ONNX inference, computes per-stage mean + stddev,
+/// and proposes a threshold halfway between the two contrastive
+/// distributions when their separation is statistically meaningful
+/// (≥ 2σ). The wizard never overrides a default unless separation is
+/// good enough — small datasets keep their defaults so a
+/// noisy environment can't make the app worse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // some variants only consumed under cfg(feature = "presence")
+pub enum CalibrationStage {
+    Welcome,
+    FaceWith,
+    FaceWithout,
+    PhoneWith,
+    PhoneWithout,
+    Summary,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CalibrationWizardState {
+    pub stage: CalibrationStage,
+    pub face_with: Vec<f32>,
+    pub face_without: Vec<f32>,
+    pub phone_with: Vec<f32>,
+    pub phone_without: Vec<f32>,
+    pub capturing: bool,
+    pub suggested_face: Option<f32>,
+    pub suggested_phone: Option<f32>,
+    /// True when the suggested threshold came from a marginal
+    /// separation (1σ ≤ Δ < 2σ). Surfaces a warning on the Summary
+    /// so the user knows the model barely separated their data.
+    pub face_marginal: bool,
+    pub phone_marginal: bool,
+    /// v1.13.0 — full analysis stored so the Summary can render
+    /// expected error rate, overlap warnings, and an actionable
+    /// recommendation instead of a vague badge. Format:
+    /// `(quality_str, error_pct, overlap, m_with, m_without)`.
+    pub face_quality: Option<(String, u32, bool, f32, f32)>,
+    pub phone_quality: Option<(String, u32, bool, f32, f32)>,
+
+    /// v1.13.0 — proactive per-stage warning shown immediately after
+    /// a batch finishes if the data looks broken (e.g. score never
+    /// rises above noise floor for "FaceWith", or stays equally high
+    /// for "FaceWithout"). When set, the wizard pauses on the just-
+    /// finished stage and offers Reintentar / Continuar.
+    pub stage_warning: Option<String>,
+}
+
+impl Default for CalibrationStage {
+    fn default() -> Self {
+        CalibrationStage::Welcome
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +177,24 @@ pub struct App {
     // actually written.
     pub(crate) last_export_path: Option<std::path::PathBuf>,
     pub(crate) last_export_error: Option<String>,
+
+    // v1.13.0 — last "Probar detección ahora" results, displayed in
+    // the Calibración tab. Each entry is None until the user runs the
+    // corresponding test.
+    pub(crate) last_window_test:
+        Option<(String, Option<String>, f32, ClassificationLabel)>,
+    #[cfg(feature = "presence")]
+    pub(crate) last_face_test: Option<(infra::presence::Presence, f32)>,
+    #[cfg(feature = "presence")]
+    pub(crate) last_phone_test: Option<f32>,
+
+    // v1.13.0 — cooldown indicator. True when last coach call was
+    // bypassed because the user voted 👎 within
+    // `settings.coach_negative_cooldown_mins`.
+    pub(crate) coach_in_curated_cooldown: bool,
+
+    // v1.13.0 — guided calibration wizard. None when not active.
+    pub(crate) calibration_wizard: Option<CalibrationWizardState>,
 
     // v1.12.0 — loaded plugins (Vec, oldest first). Each carries its
     // enable flag; a single Reload action rescans the dir.

@@ -399,10 +399,32 @@ impl App {
             .into()
         };
 
+        // v1.13.0 — cooldown badge: visible whenever the last coach
+        // call was bypassed because of a recent 👎 within
+        // settings.coach_negative_cooldown_mins.
+        let cooldown_badge: Element<'_, Message> = if self.coach_in_curated_cooldown {
+            badge_local(
+                match lang {
+                    Language::Es => format!(
+                        "Coach IA · usando banco curado tras 👎 ({} min)",
+                        self.settings.coach_negative_cooldown_mins
+                    ),
+                    Language::En => format!(
+                        "AI coach · using curated bank after 👎 ({} min)",
+                        self.settings.coach_negative_cooldown_mins
+                    ),
+                },
+                BadgeVariant::Warning,
+            )
+        } else {
+            iced::widget::Space::with_height(Length::Fixed(0.0)).into()
+        };
+
         container(
             column![
                 header,
                 iced::widget::Space::with_height(SPACE_SM as f32),
+                cooldown_badge,
                 chart_row,
                 iced::widget::Space::with_height(SPACE_XS as f32),
                 ledger,
