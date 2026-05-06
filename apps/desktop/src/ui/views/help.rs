@@ -289,6 +289,10 @@ impl App {
                 shortcut_row("B", pick("Tomar descanso", "Take break").to_string()),
                 shortcut_row("S", pick("Abrir Setup", "Open Setup").to_string()),
                 shortcut_row(
+                    "C",
+                    pick("Abrir Calibración", "Open Calibration").to_string(),
+                ),
+                shortcut_row(
                     "1 / 2 / 3 / 4",
                     pick("Focus / Stats / Coach / Setup", "Focus / Stats / Coach / Setup").to_string(),
                 ),

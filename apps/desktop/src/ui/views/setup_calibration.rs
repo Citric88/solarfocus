@@ -715,24 +715,36 @@ impl App {
             iced::widget::Space::with_width(0.0).into()
         };
 
-        // Retry button only on Summary stage — restarts the wizard fresh.
+        // v1.13.1 — selective retry on Summary: separate buttons for
+        // face vs phone, so a user with one good detector + one bad
+        // doesn't waste capture cycles re-doing the working one.
         let retry_btn: Element<'_, Message> = if matches!(wiz.stage, CalibrationStage::Summary) {
-            button(
-                text(pick("Reintentar", "Retry").to_string())
-                    .size(FONT_SMALL)
-                    .color(TEXT_PRIMARY),
-            )
-            .on_press(Message::StartCalibrationWizard)
-            .padding([8, 18])
-            .style(|_, _| iced::widget::button::Style {
-                background: Some(iced::Background::Color(SURFACE_RAISED)),
-                text_color: TEXT_PRIMARY,
-                border: iced::Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
+            let mk_btn = |label: String, msg: Message| -> Element<'_, Message> {
+                button(text(label).size(FONT_SMALL).color(TEXT_PRIMARY))
+                    .on_press(msg)
+                    .padding([8, 14])
+                    .style(|_, _| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(SURFACE_RAISED)),
+                        text_color: TEXT_PRIMARY,
+                        border: iced::Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            };
+            iced::widget::row![
+                mk_btn(
+                    pick("Reintentar cara", "Retry face").to_string(),
+                    Message::CalibrationRetryFace
+                ),
+                iced::widget::Space::with_width(SPACE_XS as f32),
+                mk_btn(
+                    pick("Reintentar celular", "Retry phone").to_string(),
+                    Message::CalibrationRetryPhone
+                ),
+            ]
             .into()
         } else {
             iced::widget::Space::with_width(0.0).into()
