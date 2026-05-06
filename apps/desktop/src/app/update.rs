@@ -2220,6 +2220,40 @@ impl App {
                 }
                 Task::none()
             }
+            Message::OpenCalibration => {
+                self.route = Route::Setup;
+                self.setup_tab = SetupTab::Calibration;
+                self.refresh_setup_caches();
+                Task::done(Message::ProbePermission)
+            }
+            Message::CalibrationRetryFace => {
+                use crate::app::state::CalibrationStage;
+                if let Some(w) = self.calibration_wizard.as_mut() {
+                    w.face_with.clear();
+                    w.face_without.clear();
+                    w.suggested_face = None;
+                    w.face_marginal = false;
+                    w.face_quality = None;
+                    w.stage_warning = None;
+                    w.capturing = false;
+                    w.stage = CalibrationStage::FaceWith;
+                }
+                Task::none()
+            }
+            Message::CalibrationRetryPhone => {
+                use crate::app::state::CalibrationStage;
+                if let Some(w) = self.calibration_wizard.as_mut() {
+                    w.phone_with.clear();
+                    w.phone_without.clear();
+                    w.suggested_phone = None;
+                    w.phone_marginal = false;
+                    w.phone_quality = None;
+                    w.stage_warning = None;
+                    w.capturing = false;
+                    w.stage = CalibrationStage::PhoneWith;
+                }
+                Task::none()
+            }
             Message::CalibrationApply => {
                 // v1.13.0 — only apply per-detector if quality is NOT
                 // 'unusable'. A high error rate or zero-mean detection

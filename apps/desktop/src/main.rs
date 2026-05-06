@@ -226,6 +226,14 @@ pub enum Message {
     /// to advance to the next stage with the (sub-par) data already
     /// captured. The Summary will surface the quality issue anyway.
     CalibrationContinueAnyway,
+    /// v1.13.1 — selective retry from Summary. Rewinds to the matching
+    /// stage and clears only that pair's buckets; the other detector's
+    /// data is preserved.
+    CalibrationRetryFace,
+    CalibrationRetryPhone,
+    /// v1.13.1 — keyboard shortcut C: jump straight to Setup →
+    /// Calibración without going through the General tab first.
+    OpenCalibration,
 }
 
 
