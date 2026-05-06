@@ -5,10 +5,10 @@
 **Pomodoro de escritorio con coach de IA que vive en tu equipo.**
 Privacidad por diseño — sin nube, sin telemetría, sin cuenta.
 
-[![estado](https://img.shields.io/badge/estado-v1.3.1--dev-brightgreen)]()
+[![estado](https://img.shields.io/badge/estado-v2.0.0--dev-brightgreen)]()
 [![rust](https://img.shields.io/badge/rust-1.78%2B-orange)]()
 [![iced](https://img.shields.io/badge/iced-0.13-blueviolet)]()
-[![plataforma](https://img.shields.io/badge/macOS-Apple%20Silicon-black)]()
+[![plataforma](https://img.shields.io/badge/macOS%20%2B%20Windows-supported-black)]()
 [![licencia](https://img.shields.io/badge/licencia-Apache--2.0%20%2F%20MIT-blue)]()
 
 </div>
@@ -104,6 +104,8 @@ nombre del proceso solamente.
 
 ## Instalación y ejecución
 
+### macOS (Apple Silicon o Intel)
+
 ```bash
 git clone https://github.com/Citric88/solarfocus.git
 cd solarfocus
@@ -114,6 +116,31 @@ cargo run
 # Compilación completa con coach IA + clasificador + Metal.
 cargo run --features llm,classifier,gpu-metal
 ```
+
+### Windows 10/11 (v2.0+)
+
+```powershell
+git clone https://github.com/Citric88/solarfocus.git
+cd solarfocus
+
+# Compilación mínima.
+cargo run --release
+
+# Con detección de presencia (cámara + YuNet/YOLO):
+cargo run --release --features presence
+
+# Coach IA local (sin aceleración GPU; gpu-metal es macOS-only):
+cargo run --release --features llm,classifier,presence
+```
+
+**Notas Windows:**
+- Primera ejecución: SmartScreen puede mostrar un aviso porque el
+  binario no está firmado todavía. Click *More info → Run anyway*.
+  El Authenticode signing llega en v2.1.
+- El detector de presencia usa Media Foundation (Win10+).
+- "Calendario en vivo" es macOS-only por ahora; en Windows usa el
+  campo manual de deadline. Outlook/WinRT integration en v2.1+.
+- Notificaciones nativas via Toast (ya integradas).
 
 ### Cargo features
 

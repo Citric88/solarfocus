@@ -14,6 +14,12 @@ pub mod persistence;
 // 📤 v1.8.0 — JSON/CSV export to Downloads.
 pub mod export;
 
+// 🔔 v2.0.0 — cross-platform native notifications (macOS / Windows / Linux).
+pub mod notify;
+
+// 📂 v2.0.0 — reveal a file in the OS file manager.
+pub mod reveal;
+
 // 🧩 v1.12.0 — declarative TOML plugin loader.
 pub mod plugins;
 

@@ -1,6 +1,6 @@
 [package]
 name = "solarfocus-desktop"
-version = "1.12.2"
+version = "2.0.0"
 edition = "2021"
 
 [dependencies]
@@ -21,6 +21,9 @@ thiserror = "1"
 # v1.12.0 — TOML plugin loader. Same crate the intelligence rules
 # parser uses; pulled in directly here so plugins ships in default build.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+# v2.0.0 — cross-platform notifications: NSUserNotification on macOS,
+# Toast on Windows, libnotify on Linux. Replaces the v1.x osascript path.
+notify-rust = "4"
 
 # Phase 3 — LLM tier (feature-gated)
 llama-cpp-2 = { workspace = true, optional = true }
@@ -36,8 +39,8 @@ tokenizers = { workspace = true, optional = true }
 # ENH-7 — share the download stack with the classifier feature too.
 
 # v1.3 Wave B — webcam capture for presence detection (feature-gated).
-# nokhwa = pure-Rust AVFoundation binding on macOS. Avoids opencv-rust.
-nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-avfoundation"] }
+# v2.0.0: `nokhwa` is declared in [target.cfg] sections at the bottom
+# of this file so each OS pulls the right backend.
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
 # v1.3 Wave C — read-only macOS calendar via EventKit (iCloud + Google
@@ -110,3 +113,15 @@ calendar = [
 [[bin]]
 name = "solarfocus-desktop"
 path = "src/main.rs"
+
+# v2.0.0 — per-target nokhwa backends. Declared at the end of the file
+# so they don't accidentally pull subsequent [dependencies] entries
+# into a target-specific section (TOML is positional).
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-avfoundation"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-msmf"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-v4l"] }
