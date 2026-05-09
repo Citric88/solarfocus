@@ -766,18 +766,300 @@ impl App {
             _ => String::new(),
         };
 
-        let body = column![
-            text(pick("Calibración guiada", "Guided calibration"))
-                .size(FONT_TITLE)
-                .color(TEXT_PRIMARY),
+        // v1.13.2 #1 — capture progress bar. Visible only mientras
+        // capturing=true, muestra cuántos de los 10 frames han llegado.
+        let in_progress_count: usize = match wiz.stage {
+            CalibrationStage::FaceWith => wiz.face_with.len(),
+            CalibrationStage::FaceWithout => wiz.face_without.len(),
+            CalibrationStage::PhoneWith => wiz.phone_with.len(),
+            CalibrationStage::PhoneWithout => wiz.phone_without.len(),
+            _ => 0,
+        };
+        let capture_progress: Element<'_, Message> = if wiz.capturing {
+            const TARGET: usize = 10;
+            let pct = (in_progress_count as f32 / TARGET as f32).clamp(0.0, 1.0);
+            let bar_width = (pct * 360.0).max(2.0);
+            let filled = container(iced::widget::Space::with_width(Length::Fixed(bar_width)))
+                .height(Length::Fixed(8.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(ACCENT)),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            let track = container(filled)
+                .width(Length::Fixed(360.0))
+                .height(Length::Fixed(8.0))
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(SURFACE_RAISED)),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            column![
+                track,
+                text(format!(
+                    "{} {}/{TARGET}",
+                    pick("Frame", "Frame"),
+                    in_progress_count
+                ))
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+            ]
+            .spacing(4)
+            .into()
+        } else {
+            iced::widget::Space::with_height(0.0).into()
+        };
+
+        // v1.13.2 #2 — progress dots. 5 círculos: ACCENT para
+        // completados, ACCENT_DIM border + transparent fill para el
+        // actual, SURFACE_RAISED para los pendientes.
+        let dot = |state: u8| -> Element<'_, Message> {
+            // state: 0=pending, 1=current, 2=done
+            let (bg, border_color, border_width) = match state {
+                2 => (ACCENT, ACCENT, 0.0),
+                1 => (iced::Color::TRANSPARENT, ACCENT, 2.0),
+                _ => (SURFACE_RAISED, SURFACE_RAISED, 0.0),
+            };
+            container(iced::widget::Space::with_width(Length::Fixed(0.0)))
+                .width(Length::Fixed(12.0))
+                .height(Length::Fixed(12.0))
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border {
+                        color: border_color,
+                        width: border_width,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
+        let dot_state = |i: u8| -> u8 {
+            // Welcome (1) ya lo cuento como "current" cuando stage_idx=1.
+            // Summary (5) marca todo como done.
+            if matches!(wiz.stage, CalibrationStage::Summary) {
+                return 2;
+            }
+            if i < stage_idx {
+                2
+            } else if i == stage_idx {
+                1
+            } else {
+                0
+            }
+        };
+        let dots_row: Element<'_, Message> = iced::widget::row![
+            dot(dot_state(1)),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            dot(dot_state(2)),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            dot(dot_state(3)),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            dot(dot_state(4)),
+            iced::widget::Space::with_width(SPACE_XS as f32),
+            dot(dot_state(5)),
+            iced::widget::Space::with_width(SPACE_SM as f32),
             text(format!(
                 "{} {} / {}",
                 pick("Paso", "Step"),
                 stage_idx,
                 total_stages
             ))
-            .size(FONT_SMALL)
+            .size(FONT_TINY)
             .color(TEXT_MUTED),
+        ]
+        .align_y(iced::alignment::Vertical::Center)
+        .into();
+
+        // v1.13.2 #3 — pre-flight check. Si la cámara no está activa,
+        // todo lo demás falla silenciosamente. Mostrar warning con
+        // botón directo a TogglePresence(true) sin tener que salir
+        // del wizard.
+        let camera_active: bool = {
+            #[cfg(feature = "presence")]
+            { self.presence_probe.is_some() }
+            #[cfg(not(feature = "presence"))]
+            { false }
+        };
+        let preflight_warning: Element<'_, Message> = if !camera_active && !matches!(wiz.stage, CalibrationStage::Summary) {
+            #[cfg(feature = "presence")]
+            let activate_btn: Element<'_, Message> = button(
+                text(pick("Activar cámara", "Enable camera").to_string())
+                    .size(FONT_SMALL)
+                    .color(BG),
+            )
+            .on_press(Message::TogglePresence(true))
+            .padding([6, 14])
+            .style(|_, _| iced::widget::button::Style {
+                background: Some(iced::Background::Color(ACCENT)),
+                text_color: BG,
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into();
+            #[cfg(not(feature = "presence"))]
+            let activate_btn: Element<'_, Message> = text(pick(
+                "Build sin cámara — recompila con --features presence",
+                "Build without camera — rebuild with --features presence",
+            ))
+            .size(FONT_SMALL)
+            .color(TEXT_MUTED)
+            .into();
+            container(
+                column![
+                    text(pick(
+                        "⚠ Cámara desactivada",
+                        "⚠ Camera off",
+                    ))
+                    .size(FONT_BODY)
+                    .color(WARNING),
+                    text(pick(
+                        "El wizard necesita la cámara encendida para capturar frames. Actívala aquí mismo:",
+                        "The wizard needs the camera on to capture frames. Enable it right here:",
+                    ))
+                    .size(FONT_SMALL)
+                    .color(TEXT_SECONDARY),
+                    activate_btn,
+                ]
+                .spacing(SPACE_XS as u16),
+            )
+            .padding(SPACE_MD as u16)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(SURFACE_RAISED)),
+                border: iced::Border {
+                    color: WARNING,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            iced::widget::Space::with_height(0.0).into()
+        };
+
+        // v1.13.2 #4 — mini histograma para el Summary. Visualiza las
+        // dos distribuciones (with/without) sobre la misma línea 0..1
+        // con marca vertical en el threshold sugerido.
+        let histogram = |with_scores: &[f32],
+                         without_scores: &[f32],
+                         threshold: Option<f32>,
+                         label: &str|
+         -> Element<'_, Message> {
+            const W: f32 = 480.0;
+            const H: f32 = 32.0;
+            // Render como single row de 100 cells (1% bucket cada una),
+            // coloreadas según hits. Iced 0.13 no tiene absolute-positioned
+            // Stack, así que esto es la opción más portable.
+            let mut cells = Vec::with_capacity(100);
+            for i in 0..100 {
+                let bucket_start = i as f32 / 100.0;
+                let bucket_end = (i + 1) as f32 / 100.0;
+                let with_hit = with_scores
+                    .iter()
+                    .any(|&s| s >= bucket_start && s < bucket_end);
+                let without_hit = without_scores
+                    .iter()
+                    .any(|&s| s >= bucket_start && s < bucket_end);
+                let threshold_here = threshold
+                    .map(|t| t >= bucket_start && t < bucket_end)
+                    .unwrap_or(false);
+                let color: iced::Color = if threshold_here {
+                    TEXT_PRIMARY
+                } else if with_hit && without_hit {
+                    WARNING
+                } else if with_hit {
+                    ACCENT
+                } else if without_hit {
+                    DANGER
+                } else {
+                    SURFACE_RAISED
+                };
+                let h = if threshold_here { H } else { 6.0 };
+                cells.push(
+                    container(iced::widget::Space::with_height(Length::Fixed(h)))
+                        .width(Length::Fixed(W / 100.0))
+                        .height(Length::Fixed(h))
+                        .style(move |_| container::Style {
+                            background: Some(iced::Background::Color(color)),
+                            ..Default::default()
+                        })
+                        .into(),
+                );
+            }
+            let row = iced::widget::Row::with_children(cells)
+                .align_y(iced::alignment::Vertical::Center);
+            column![
+                text(label.to_string()).size(FONT_TINY).color(TEXT_MUTED),
+                container(row)
+                    .width(Length::Fixed(W))
+                    .height(Length::Fixed(H))
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(SURFACE)),
+                        border: iced::Border {
+                            radius: 3.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                iced::widget::row![
+                    text(pick("0.0", "0.0")).size(FONT_TINY).color(TEXT_MUTED),
+                    iced::widget::horizontal_space(),
+                    text(pick("threshold", "threshold"))
+                        .size(FONT_TINY)
+                        .color(TEXT_PRIMARY),
+                    iced::widget::horizontal_space(),
+                    text(pick("1.0", "1.0")).size(FONT_TINY).color(TEXT_MUTED),
+                ]
+                .width(Length::Fixed(W)),
+            ]
+            .spacing(2)
+            .into()
+        };
+
+        let summary_histograms: Element<'_, Message> = if matches!(wiz.stage, CalibrationStage::Summary) {
+            column![
+                histogram(
+                    &wiz.face_with,
+                    &wiz.face_without,
+                    wiz.suggested_face,
+                    pick(
+                        "YuNet · verde=con cara · rojo=sin cara · amarillo=solapamiento",
+                        "YuNet · green=with face · red=without · yellow=overlap",
+                    ),
+                ),
+                iced::widget::Space::with_height(SPACE_SM as f32),
+                histogram(
+                    &wiz.phone_with,
+                    &wiz.phone_without,
+                    wiz.suggested_phone,
+                    pick(
+                        "YOLO · verde=con celular · rojo=sin celular · amarillo=solapamiento",
+                        "YOLO · green=with phone · red=without · yellow=overlap",
+                    ),
+                ),
+            ]
+            .spacing(SPACE_XS as u16)
+            .into()
+        } else {
+            iced::widget::Space::with_height(0.0).into()
+        };
+
+        let body = column![
+            text(pick("Calibración guiada", "Guided calibration"))
+                .size(FONT_TITLE)
+                .color(TEXT_PRIMARY),
+            dots_row,
+            preflight_warning,
             text(title.to_string()).size(FONT_LEAD).color(TEXT_PRIMARY),
             text(instruction).size(FONT_BODY).color(TEXT_SECONDARY),
             iced::widget::Space::with_height(SPACE_SM as f32),
@@ -792,7 +1074,10 @@ impl App {
             ]
             .align_y(iced::alignment::Vertical::Center),
             iced::widget::Space::with_height(SPACE_XS as f32),
+            capture_progress,
             text(last_batch_summary).size(FONT_TINY).color(TEXT_MUTED),
+            iced::widget::Space::with_height(SPACE_XS as f32),
+            summary_histograms,
         ]
         .spacing(SPACE_SM as u16)
         .max_width(720);
