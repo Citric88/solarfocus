@@ -979,7 +979,11 @@ mod tests {
             .unwrap();
             conn.execute(
                 "INSERT INTO sessions (start_time, duration, state) VALUES (?, ?, ?)",
-                rusqlite::params!["2026-04-30T10:00:00Z", 1500.0, "completed"],
+                rusqlite::params![
+                    (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+                    1500.0,
+                    "completed"
+                ],
             )
             .unwrap();
         }
