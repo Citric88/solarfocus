@@ -946,9 +946,14 @@ mod tests {
                 [],
             )
             .unwrap();
+            // v2.1: fecha relativa (ayer) en vez de hardcoded "2026-04-30"
+            // que con el paso del tiempo cae fuera del window de 7 días que
+            // usa category_totals_last_days y rompe el assert de "Focus".
+            let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
+                .to_rfc3339();
             conn.execute(
                 "INSERT INTO sessions (start_time, duration, state) VALUES (?, ?, ?)",
-                rusqlite::params!["2026-04-30T10:00:00Z", 1500.0, "completed"],
+                rusqlite::params![yesterday, 1500.0, "completed"],
             )
             .unwrap();
         }

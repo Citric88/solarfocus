@@ -905,6 +905,24 @@ impl App {
                 self.settings.save();
                 Task::none()
             }
+            // v2.1.0 — cross-platform ICS file path.
+            #[cfg(feature = "calendar")]
+            Message::SetCalendarIcsPath(s) => {
+                self.settings.calendar_ics_path = s.trim().to_string();
+                self.settings.save();
+                // Trigger a refresh so the new file is read immediately.
+                if !self.settings.calendar_ics_path.is_empty() {
+                    return Task::done(Message::CalendarRefresh);
+                }
+                Task::none()
+            }
+            #[cfg(feature = "calendar")]
+            Message::ClearCalendarIcsPath => {
+                self.settings.calendar_ics_path.clear();
+                self.settings.save();
+                self.calendar_events.clear();
+                Task::none()
+            }
             // v1.3.1 — live EventKit toggle. macOS Calendar permission
             // prompt is synchronous via EventKit's barrier-based wait;
             // the first call typically returns within ~100 ms (or
@@ -956,12 +974,39 @@ impl App {
             #[cfg(feature = "calendar")]
             Message::CalendarRefresh => {
                 use infra::calendar::CalendarSource;
+                // v2.1.0 — combine events from both sources (live EventKit
+                // reader on macOS + ICS file on any OS), dedup by
+                // (title, start), sort by start.
+                let mut combined: Vec<infra::calendar::CalendarEvent> = Vec::new();
+                let mut errs: Vec<String> = Vec::new();
+
                 if let Some(reader) = self.calendar_reader.as_ref() {
-                    let result = reader.events_today().map_err(|e| e.to_string());
-                    Task::done(Message::CalendarEventsLoaded(result))
-                } else {
-                    Task::none()
+                    match reader.events_today() {
+                        Ok(mut events) => combined.append(&mut events),
+                        Err(e) => errs.push(format!("EventKit: {e}")),
+                    }
                 }
+
+                let ics_path = self.settings.calendar_ics_path.trim();
+                if !ics_path.is_empty() {
+                    let src = infra::calendar::IcsFileSource::new(ics_path);
+                    match src.events_today() {
+                        Ok(mut events) => combined.append(&mut events),
+                        Err(e) => errs.push(format!("ICS: {e}")),
+                    }
+                }
+
+                // Dedup by (title, start) — same meeting can appear in
+                // both EventKit and an ICS export of the same calendar.
+                combined.sort_by(|a, b| a.start.cmp(&b.start).then(a.title.cmp(&b.title)));
+                combined.dedup_by(|a, b| a.title == b.title && a.start == b.start);
+
+                let result = if combined.is_empty() && !errs.is_empty() {
+                    Err(errs.join(" · "))
+                } else {
+                    Ok(combined)
+                };
+                Task::done(Message::CalendarEventsLoaded(result))
             }
             #[cfg(feature = "calendar")]
             Message::CalendarEventsLoaded(result) => {

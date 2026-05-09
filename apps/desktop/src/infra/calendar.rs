@@ -139,6 +139,197 @@ impl CalendarSource for ManualDeadlineSource {
     }
 }
 
+// --- v2.1 — ICS file reader (cross-platform live calendar) -------------
+//
+// Reads a local `.ics` file the user pointed at via Setup → General.
+// Works on macOS, Windows, and Linux without any native API binding —
+// every major calendar provider exports to ICS:
+//   - Outlook: File → Save Calendar → .ics
+//   - Google Calendar: Settings → Export → .zip with one .ics per
+//     calendar, or any single calendar's "Public URL" → .ics
+//   - Apple Calendar: File → Export → .ics
+//   - iCloud / Exchange / Office 365: subscribe URL → publishes .ics
+//
+// Privacy contract: file lives on disk where the user put it. We never
+// download from the publish URL automatically; the user is responsible
+// for keeping it fresh (drop-in or auto-sync via the user's tool of
+// choice).
+pub struct IcsFileSource {
+    pub path: std::path::PathBuf,
+}
+
+impl IcsFileSource {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl CalendarSource for IcsFileSource {
+    fn events_today(&self) -> Result<Vec<CalendarEvent>, CalendarError> {
+        let body = std::fs::read_to_string(&self.path).map_err(|e| {
+            CalendarError::Unavailable(format!("Cannot read .ics: {e}"))
+        })?;
+        let now = Local::now();
+        let day_start = Local
+            .from_local_datetime(&now.date_naive().and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap_or(now);
+        let day_end = end_of_today(now);
+        Ok(parse_ics_events(&body, day_start, day_end))
+    }
+}
+
+/// Pure parser for ICS bodies. Only extracts what we need:
+/// SUMMARY, DTSTART, DTEND. Skips everything else (RRULE, ATTENDEE,
+/// VALARM, etc.) — SolarFocus only cares about "what's blocking the
+/// next 24h". Returns events whose [start, end] intersects
+/// [filter_start, filter_end].
+///
+/// Format support: VEVENT blocks with VALUE=DATE-TIME starts/ends in
+/// either UTC (`Z` suffix) or floating-local. Recurring events (RRULE)
+/// are NOT expanded — only the master DTSTART is reported. This is
+/// honest minimum-viable; richer support is a follow-up.
+pub fn parse_ics_events(
+    body: &str,
+    filter_start: DateTime<Local>,
+    filter_end: DateTime<Local>,
+) -> Vec<CalendarEvent> {
+    let mut out = Vec::new();
+    let mut in_event = false;
+    let mut summary: Option<String> = None;
+    let mut dtstart: Option<DateTime<Local>> = None;
+    let mut dtend: Option<DateTime<Local>> = None;
+
+    // ICS uses CRLF line continuations: a line starting with space or
+    // tab continues the previous line. Unfold first.
+    let unfolded = unfold_ics(body);
+
+    for line in unfolded.lines() {
+        let line = line.trim_end();
+        if line == "BEGIN:VEVENT" {
+            in_event = true;
+            summary = None;
+            dtstart = None;
+            dtend = None;
+            continue;
+        }
+        if line == "END:VEVENT" {
+            if let (Some(s), Some(e)) = (dtstart, dtend) {
+                if e > filter_start && s < filter_end {
+                    out.push(CalendarEvent {
+                        title: summary.clone().unwrap_or_else(|| "(sin título)".to_string()),
+                        start: s,
+                        end: e,
+                        source: "ICS".to_string(),
+                    });
+                }
+            } else if let Some(s) = dtstart {
+                // No DTEND → assume 30-minute event.
+                let e = s + chrono::Duration::minutes(30);
+                if e > filter_start && s < filter_end {
+                    out.push(CalendarEvent {
+                        title: summary.clone().unwrap_or_else(|| "(sin título)".to_string()),
+                        start: s,
+                        end: e,
+                        source: "ICS".to_string(),
+                    });
+                }
+            }
+            in_event = false;
+            continue;
+        }
+        if !in_event {
+            continue;
+        }
+        // Property line: "NAME[;PARAM=VALUE...]:VALUE"
+        let (name_part, value) = match line.split_once(':') {
+            Some(t) => t,
+            None => continue,
+        };
+        // Strip params from name.
+        let name = name_part.split(';').next().unwrap_or(name_part);
+        match name {
+            "SUMMARY" => {
+                summary = Some(unescape_ics(value));
+            }
+            "DTSTART" => {
+                dtstart = parse_ics_datetime(value);
+            }
+            "DTEND" => {
+                dtend = parse_ics_datetime(value);
+            }
+            _ => {}
+        }
+    }
+    out.sort_by_key(|e| e.start);
+    out
+}
+
+fn unfold_ics(body: &str) -> String {
+    // Per RFC 5545: lines starting with " " or "\t" continue the prev.
+    let mut out = String::with_capacity(body.len());
+    for raw in body.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.starts_with(' ') || line.starts_with('\t') {
+            out.push_str(&line[1..]);
+        } else {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn unescape_ics(s: &str) -> String {
+    // RFC 5545 §3.3.11: \\, \;, \,, \N, \n
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') | Some('N') => out.push('\n'),
+                Some(';') => out.push(';'),
+                Some(',') => out.push(','),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_ics_datetime(value: &str) -> Option<DateTime<Local>> {
+    // Two formats we accept:
+    //   YYYYMMDDTHHMMSSZ   → UTC
+    //   YYYYMMDDTHHMMSS    → floating local
+    //   YYYYMMDD           → date-only, treat as local midnight
+    let v = value.trim();
+    if v.len() == 16 && v.ends_with('Z') {
+        // 20260508T143000Z
+        let utc = chrono::NaiveDateTime::parse_from_str(&v[..15], "%Y%m%dT%H%M%S").ok()?;
+        Some(chrono::Utc.from_utc_datetime(&utc).with_timezone(&Local))
+    } else if v.len() == 15 {
+        // 20260508T143000
+        let naive = chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%S").ok()?;
+        Local.from_local_datetime(&naive).single()
+    } else if v.len() == 8 {
+        // 20260508 — date only
+        let date = chrono::NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
+        let naive = date.and_hms_opt(0, 0, 0)?;
+        Local.from_local_datetime(&naive).single()
+    } else {
+        None
+    }
+}
+
 // --- macOS EventKit live reader (v1.3.1) -------------------------------
 
 #[cfg(target_os = "macos")]
@@ -270,6 +461,7 @@ pub mod ek {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
     use chrono::TimeZone;
 
     fn at(h: u32, m: u32) -> DateTime<Local> {
@@ -347,6 +539,102 @@ mod tests {
         let now = at(10, 0);
         let block = find_next_free_block(&[], now, 60).unwrap();
         assert_eq!(block.start, at(10, 0));
+    }
+
+    // --- v2.1 ICS parser tests ---
+
+    fn at_local(h: u32, m: u32) -> DateTime<Local> {
+        let now = Local::now().date_naive();
+        Local
+            .from_local_datetime(&now.and_hms_opt(h, m, 0).unwrap())
+            .single()
+            .unwrap()
+    }
+
+    #[test]
+    fn ics_parses_single_event_local() {
+        let now = Local::now();
+        let today = now.format("%Y%m%d").to_string();
+        let body = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+             SUMMARY:Standup\r\nDTSTART:{today}T140000\r\n\
+             DTEND:{today}T143000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let day_start = at_local(0, 0);
+        let day_end = at_local(23, 59);
+        let events = parse_ics_events(&body, day_start, day_end);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "Standup");
+        assert_eq!(events[0].start.hour(), 14);
+        assert_eq!(events[0].source, "ICS");
+    }
+
+    #[test]
+    fn ics_unescapes_summary() {
+        let now = Local::now();
+        let today = now.format("%Y%m%d").to_string();
+        let body = format!(
+            "BEGIN:VEVENT\r\nSUMMARY:Hello\\, World\\nLine 2\r\n\
+             DTSTART:{today}T140000\r\nDTEND:{today}T143000\r\n\
+             END:VEVENT\r\n"
+        );
+        let events = parse_ics_events(&body, at_local(0, 0), at_local(23, 59));
+        assert_eq!(events[0].title, "Hello, World\nLine 2");
+    }
+
+    #[test]
+    fn ics_filters_events_outside_window() {
+        // Event yesterday should not appear.
+        let yesterday = (Local::now() - chrono::Duration::days(1))
+            .format("%Y%m%d")
+            .to_string();
+        let body = format!(
+            "BEGIN:VEVENT\r\nSUMMARY:Old\r\n\
+             DTSTART:{yesterday}T140000\r\nDTEND:{yesterday}T143000\r\n\
+             END:VEVENT\r\n"
+        );
+        let events = parse_ics_events(&body, at_local(0, 0), at_local(23, 59));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn ics_handles_no_dtend_with_30min_default() {
+        let now = Local::now();
+        let today = now.format("%Y%m%d").to_string();
+        let body = format!(
+            "BEGIN:VEVENT\r\nSUMMARY:Quick\r\nDTSTART:{today}T140000\r\nEND:VEVENT\r\n"
+        );
+        let events = parse_ics_events(&body, at_local(0, 0), at_local(23, 59));
+        assert_eq!(events.len(), 1);
+        let dur = events[0].end - events[0].start;
+        assert_eq!(dur.num_minutes(), 30);
+    }
+
+    #[test]
+    fn ics_handles_line_folding() {
+        // RFC 5545: lines starting with space continue the previous line.
+        let now = Local::now();
+        let today = now.format("%Y%m%d").to_string();
+        let body = format!(
+            "BEGIN:VEVENT\r\nSUMMARY:Very long event title that is\r\n folded across two lines\r\n\
+             DTSTART:{today}T140000\r\nDTEND:{today}T143000\r\nEND:VEVENT\r\n"
+        );
+        let events = parse_ics_events(&body, at_local(0, 0), at_local(23, 59));
+        assert_eq!(events[0].title, "Very long event title that isfolded across two lines");
+    }
+
+    #[test]
+    fn ics_skips_unknown_properties() {
+        let now = Local::now();
+        let today = now.format("%Y%m%d").to_string();
+        let body = format!(
+            "BEGIN:VEVENT\r\nSUMMARY:Meeting\r\nRRULE:FREQ=WEEKLY\r\n\
+             ATTENDEE;CN=Bob:mailto:bob@example.com\r\n\
+             DTSTART:{today}T140000\r\nDTEND:{today}T143000\r\nEND:VEVENT\r\n"
+        );
+        let events = parse_ics_events(&body, at_local(0, 0), at_local(23, 59));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "Meeting");
     }
 }
 

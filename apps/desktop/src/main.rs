@@ -116,6 +116,11 @@ pub enum Message {
     CalendarRefresh,
     #[cfg(feature = "calendar")]
     CalendarEventsLoaded(Result<Vec<infra::calendar::CalendarEvent>, String>),
+    // v2.1.0 — cross-platform ICS file source for calendar events.
+    #[cfg(feature = "calendar")]
+    SetCalendarIcsPath(String),
+    #[cfg(feature = "calendar")]
+    ClearCalendarIcsPath,
     ThumbsUp,
     ThumbsDown,
 

@@ -145,6 +145,18 @@ pub struct Settings {
     #[serde(default)]
     pub calendar_live_enabled: bool,
 
+    // v2.1.0 — optional path to a .ics file the user dropped on disk.
+    // Cross-platform alternative to EventKit; works on any OS because
+    // every major calendar provider can export to ICS:
+    //   Outlook → File → Save Calendar
+    //   Google Calendar → Settings → Export
+    //   Apple Calendar → File → Export
+    //   iCloud / Exchange → publish URL
+    // When set, IcsFileSource is added as a CalendarSource alongside
+    // (or instead of) ManualDeadlineSource. Empty string = disabled.
+    #[serde(default)]
+    pub calendar_ics_path: String,
+
     // v1.8.0 — minimum attention score (0-100) for a session to count as
     // "valid". Below this threshold a session is recorded but flagged
     // `is_valid=false`. Used by Stats to surface unrealistic streaks and
@@ -235,6 +247,7 @@ impl Default for Settings {
             next_deadline_at: None,
             next_deadline_label: String::new(),
             calendar_live_enabled: false,
+            calendar_ics_path: String::new(),
             min_attention_for_valid_session: default_min_attention(),
             deep_mode_enabled: false,
             plugin_overrides: std::collections::HashMap::new(),
