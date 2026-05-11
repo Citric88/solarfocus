@@ -1,6 +1,6 @@
 [package]
 name = "solarfocus-desktop"
-version = "1.12.2"
+version = "2.0.0"
 edition = "2021"
 
 [dependencies]
@@ -21,6 +21,9 @@ thiserror = "1"
 # v1.12.0 — TOML plugin loader. Same crate the intelligence rules
 # parser uses; pulled in directly here so plugins ships in default build.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+# v2.0.0 — cross-platform notifications: NSUserNotification on macOS,
+# Toast on Windows, libnotify on Linux. Replaces the v1.x osascript path.
+notify-rust = "4"
 
 # Phase 3 — LLM tier (feature-gated)
 llama-cpp-2 = { workspace = true, optional = true }
@@ -36,29 +39,18 @@ tokenizers = { workspace = true, optional = true }
 # ENH-7 — share the download stack with the classifier feature too.
 
 # v1.3 Wave B — webcam capture for presence detection (feature-gated).
-# nokhwa = pure-Rust AVFoundation binding on macOS. Avoids opencv-rust.
-nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-avfoundation"] }
+# v2.0.0: `nokhwa` is declared in [target.cfg] sections at the bottom
+# of this file so each OS pulls the right backend.
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
-# v1.3 Wave C — read-only macOS calendar via EventKit (iCloud + Google
-# + Exchange + Local in one unified API).
-objc2 = { version = "0.5", optional = true }
-objc2-foundation = { version = "0.2", optional = true, features = [
-    "NSDate",
-    "NSArray",
-    "NSString",
-    "NSPredicate",
-    "NSError",
-] }
-objc2-event-kit = { version = "0.2", optional = true, features = [
-    "EKEventStore",
-    "EKEvent",
-    "EKCalendar",
-    "EKCalendarItem",
-    "EKObject",
-    "block2",
-] }
-block2 = { version = "0.5", optional = true }
+# v1.3 Wave C / v2.0.0 — EventKit deps live under
+# [target.'cfg(target_os = "macos")'.dependencies] at the bottom of this
+# file. The objc-sys build script panics on non-Apple platforms, so
+# these MUST NOT live in the global [dependencies] table even with
+# `optional = true` — Cargo still tries to resolve them and the
+# transitive build script runs on Windows. The `calendar` feature
+# below is now a pure marker; wiring is done via
+# `cfg(all(feature = "calendar", target_os = "macos"))` in calendar.rs.
 
 [features]
 default = []
@@ -100,13 +92,46 @@ presence = [
 # v1.3 Wave C — calendar-aware focus suggestions. v1.3.0 shipped the
 # free-block algorithm + manual deadline input. v1.3.1 adds the live
 # EventKit reader covering iCloud / Google / Exchange / Local.
-calendar = [
-    "dep:objc2",
-    "dep:objc2-foundation",
-    "dep:objc2-event-kit",
-    "dep:block2",
-]
+# v2.0.0: pure marker — the objc2-* deps live under
+# [target.'cfg(target_os = "macos")'.dependencies] so they never enter
+# the resolver graph on Windows/Linux. The macOS-only EventKit code
+# path is gated with cfg(all(feature = "calendar", target_os = "macos")).
+calendar = []
 
 [[bin]]
 name = "solarfocus-desktop"
 path = "src/main.rs"
+
+# v2.0.0 — per-target deps. Declared at the end of the file so they
+# don't accidentally pull subsequent [dependencies] entries into a
+# target-specific section (TOML is positional). Two cohorts here:
+# - nokhwa per-OS for camera capture
+# - objc2-*/block2 only on macOS so the objc-sys build script never
+#   runs on Windows (it panics with "Must specify the desired runtime
+#   using Cargo features on non-Apple platforms")
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-avfoundation"] }
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = [
+    "NSDate",
+    "NSArray",
+    "NSString",
+    "NSPredicate",
+    "NSError",
+] }
+objc2-event-kit = { version = "0.2", features = [
+    "EKEventStore",
+    "EKEvent",
+    "EKCalendar",
+    "EKCalendarItem",
+    "EKObject",
+    "block2",
+] }
+block2 = "0.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-msmf"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", optional = true, default-features = false, features = ["input-v4l"] }

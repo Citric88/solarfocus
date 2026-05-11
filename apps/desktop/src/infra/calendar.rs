@@ -349,3 +349,29 @@ mod tests {
         assert_eq!(block.start, at(10, 0));
     }
 }
+
+// --- v2.0.0 — stub `ek` module on non-macOS targets ------------------
+// Lets the rest of the codebase reference `infra::calendar::ek::CalendarReader`
+// without per-call-site cfg gates. On Windows/Linux the reader simply
+// returns an error explaining the limitation. Full Outlook/WinRT/iCloud
+// integration is deferred to v2.1+.
+#[cfg(not(target_os = "macos"))]
+pub mod ek {
+    use super::{CalendarError, CalendarEvent};
+
+    pub struct CalendarReader;
+
+    impl CalendarReader {
+        pub fn new() -> Result<Self, CalendarError> {
+            Err(CalendarError::Unavailable(
+                "Live calendar no soportado en esta plataforma — usa el deadline manual".into(),
+            ))
+        }
+        pub fn request_access(&self) -> Result<bool, CalendarError> {
+            Ok(false)
+        }
+        pub fn events_today(&self) -> Result<Vec<CalendarEvent>, CalendarError> {
+            Ok(Vec::new())
+        }
+    }
+}

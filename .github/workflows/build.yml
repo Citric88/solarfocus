@@ -1,0 +1,89 @@
+name: Build
+
+on:
+  push:
+    branches: [main, "v*-dev"]
+  pull_request:
+    branches: [main]
+
+# v2.0.0 — first CI workflow. Runs on every push to main / v*-dev branches
+# and every PR targeting main. Three jobs cover the supported (and
+# tentatively-supported) platforms:
+#   - macOS-latest:  primary target. Full feature matrix.
+#   - windows-latest: v2.0.0 target. Same matrix minus gpu-metal.
+#   - ubuntu-latest:  smoke only. Default features build + test; not
+#                     a release target yet.
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "llm,classifier,gpu-metal"
+          - "presence"
+          - "calendar"
+          - "llm,classifier,presence,calendar,gpu-metal"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (features=${{ matrix.features }})
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo build --release
+          else
+            cargo build --release --features "${{ matrix.features }}"
+          fi
+      - name: Test (llm+classifier)
+        if: matrix.features == 'llm,classifier,gpu-metal'
+        run: cargo test --features llm,classifier
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "presence"
+          - "calendar"
+          # gpu-metal is macOS-only; gpu-cuda needs the CUDA toolkit
+          # which isn't pre-installed on the runner. LLM-without-GPU
+          # still validates the llama-cpp-2 build path.
+          - "llm,classifier"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (features=${{ matrix.features }})
+        shell: bash
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo build --release
+          else
+            cargo build --release --features "${{ matrix.features }}"
+          fi
+
+  linux-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps for iced + nokhwa + libnotify
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev libegl1-mesa-dev libgbm-dev \
+            libxkbcommon-dev libwayland-dev libdbus-1-dev \
+            libv4l-dev libudev-dev pkg-config
+      - name: Build default (no features)
+        run: cargo build --release
+      - name: Test default
+        run: cargo test

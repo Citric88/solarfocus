@@ -336,13 +336,12 @@ impl App {
                             self.distractions_today,
                             c.matched_rule
                         );
-                        // v1.4.0 rc11 — fire a real macOS notification
-                        // via osascript so the alert reaches the user
-                        // even when they're on the distracting app.
-                        // Toast alone was missing the moment because
-                        // the user is by definition not looking at
-                        // SolarFocus when a window distraction fires.
-                        #[cfg(target_os = "macos")]
+                        // v2.0.0 — cross-platform native notification
+                        // (was macOS osascript-only in v1.x). The alert
+                        // reaches the user even when they're on the
+                        // distracting app — toast alone misses the
+                        // moment because the user is by definition not
+                        // looking at SolarFocus.
                         {
                             let rule = c.matched_rule.clone()
                                 .unwrap_or_else(|| "?".to_string());
@@ -350,13 +349,7 @@ impl App {
                                 Language::Es => format!("Distracción: {}. Vuelve al foco.", rule),
                                 Language::En => format!("Distraction: {}. Refocus.", rule),
                             };
-                            let _ = std::process::Command::new("osascript")
-                                .arg("-e")
-                                .arg(format!(
-                                    r#"display notification "{}" with title "SolarFocus OS" sound name "Submarine""#,
-                                    body.replace('"', "\\\""),
-                                ))
-                                .spawn();
+                            crate::infra::notify::send("SolarFocus OS", &body);
                         }
                         // v1.4.1 — auto-pause the focus session on a
                         // confirmed window distraction. Live test of
@@ -1108,21 +1101,13 @@ impl App {
                                 },
                                 expires_at: Instant::now() + Duration::from_secs(5),
                             });
-                            // macOS notification — same path as window
-                            // distractions in v1.4.0 rc11.
-                            #[cfg(target_os = "macos")]
+                            // v2.0.0 — cross-platform native notification.
                             {
                                 let body = match self.settings.language {
                                     Language::Es => "Celular detectado por la cámara",
                                     Language::En => "Phone detected by camera",
                                 };
-                                let _ = std::process::Command::new("osascript")
-                                    .arg("-e")
-                                    .arg(format!(
-                                        "display notification \"{}\" with title \"SolarFocus OS\" sound name \"Submarine\"",
-                                        body
-                                    ))
-                                    .spawn();
+                                crate::infra::notify::send("SolarFocus OS", body);
                             }
                         }
                     }
@@ -1340,6 +1325,7 @@ impl App {
                 Task::none()
             }
             Message::OpenSystemSettings => {
+                // v2.0.0 — cross-platform privacy deep-link.
                 #[cfg(target_os = "macos")]
                 {
                     let _ = std::process::Command::new("open")
@@ -1347,9 +1333,20 @@ impl App {
                         .spawn();
                     log::info!("Opened macOS Privacy → Screen Recording");
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(target_os = "windows")]
                 {
-                    log::info!("Open System Settings is macOS-only");
+                    // Windows 10/11: ms-settings:privacy is the closest
+                    // analogue. Win32 EnumWindows doesn't gate the
+                    // window title behind a permission like macOS Screen
+                    // Recording does, so this is mostly informational.
+                    let _ = std::process::Command::new("explorer")
+                        .arg("ms-settings:privacy")
+                        .spawn();
+                    log::info!("Opened Windows Settings → Privacy");
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    log::info!("Open System Settings is not implemented on Linux");
                 }
                 Task::none()
             }
@@ -1628,13 +1625,8 @@ impl App {
                 log::info!("Export written: {}", path.display());
                 self.last_export_path = Some(path.clone());
                 self.last_export_error = None;
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("open")
-                        .arg("-R")
-                        .arg(&path)
-                        .spawn();
-                }
+                // v2.0.0 — cross-platform reveal (Finder / Explorer / xdg-open).
+                crate::infra::reveal::reveal(&path);
                 let toast_text = match self.settings.language {
                     Language::Es => format!("Exportado: {}", path.display()),
                     Language::En => format!("Exported: {}", path.display()),
