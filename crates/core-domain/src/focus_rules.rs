@@ -68,7 +68,10 @@ impl Default for ProductivityRule {
     }
 }
 
-/// Motor de reglas de productividad
+/// Motor de Reglas Heurísticas de Enfoque.
+/// Procesa los eventos de éxito, pausas y distracciones durante las sesiones.
+/// Implementa la lógica para decidir cuándo generar una notificación o alerta,
+/// como felicitar al obtener XP o advertir si hubo múltiples distracciones seguidas.
 pub struct FocusRulesEngine {
     /// Reglas activas
     rules: Vec<ProductivityRule>,
