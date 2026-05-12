@@ -1,6 +1,7 @@
 [package]
 name = "solarfocus-desktop"
-version = "2.0.0"
+# v2.2.0 = v2.1 (Windows port + ICS calendar) + v1.13.x (calibración wizard)
+version = "2.2.0"
 edition = "2021"
 
 [dependencies]
@@ -20,7 +21,9 @@ solar-focus-intelligence = { path = "../../crates/intelligence" }
 thiserror = "1"
 # v1.12.0 — TOML plugin loader. Same crate the intelligence rules
 # parser uses; pulled in directly here so plugins ships in default build.
-toml = { version = "0.8", default-features = false, features = ["parse"] }
+# v1.13.0 needs the "display" feature to serialize plugin TOML back
+# to disk for the auto-generated user exceptions plugin.
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 # v2.0.0 — cross-platform notifications: NSUserNotification on macOS,
 # Toast on Windows, libnotify on Linux. Replaces the v1.x osascript path.
 notify-rust = "4"

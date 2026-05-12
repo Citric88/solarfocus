@@ -384,6 +384,38 @@ impl App {
                 .color(TEXT_MUTED),
                 live_toggle_row,
                 calendar_status,
+                // v2.1.0 — cross-platform ICS file source. Cualquier
+                // calendario exporta a .ics (Outlook File→Save Calendar,
+                // Google Settings→Export, Apple File→Export). Funciona
+                // en macOS/Windows/Linux sin permisos especiales.
+                text(match self.settings.language {
+                    Language::Es => "O apunta a un archivo .ics local (cross-platform):",
+                    Language::En => "Or point to a local .ics file (cross-platform):",
+                })
+                .size(FONT_TINY)
+                .color(TEXT_MUTED),
+                iced::widget::row![
+                    iced::widget::text_input(
+                        match self.settings.language {
+                            Language::Es => "Ruta absoluta al .ics",
+                            Language::En => "Absolute path to .ics",
+                        },
+                        &self.settings.calendar_ics_path,
+                    )
+                    .on_input(Message::SetCalendarIcsPath)
+                    .padding([4, 8])
+                    .size(FONT_SMALL)
+                    .width(Length::Fixed(380.0)),
+                    iced::widget::Space::with_width(SPACE_SM as f32),
+                    chip_local(
+                        match self.settings.language {
+                            Language::Es => "Quitar".to_string(),
+                            Language::En => "Clear".to_string(),
+                        },
+                        false,
+                        Message::ClearCalendarIcsPath,
+                    ),
+                ],
                 text(match self.settings.language {
                     Language::Es => "O introduce un deadline manual (se usa si el calendario está desactivado o no hay eventos):",
                     Language::En => "Or enter a manual deadline (used when live calendar is off or empty):",

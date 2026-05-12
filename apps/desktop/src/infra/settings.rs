@@ -145,6 +145,18 @@ pub struct Settings {
     #[serde(default)]
     pub calendar_live_enabled: bool,
 
+    // v2.1.0 — optional path to a .ics file the user dropped on disk.
+    // Cross-platform alternative to EventKit; works on any OS because
+    // every major calendar provider can export to ICS:
+    //   Outlook → File → Save Calendar
+    //   Google Calendar → Settings → Export
+    //   Apple Calendar → File → Export
+    //   iCloud / Exchange → publish URL
+    // When set, IcsFileSource is added as a CalendarSource alongside
+    // (or instead of) ManualDeadlineSource. Empty string = disabled.
+    #[serde(default)]
+    pub calendar_ics_path: String,
+
     // v1.8.0 — minimum attention score (0-100) for a session to count as
     // "valid". Below this threshold a session is recorded but flagged
     // `is_valid=false`. Used by Stats to surface unrealistic streaks and
@@ -159,6 +171,20 @@ pub struct Settings {
     #[serde(default)]
     pub deep_mode_enabled: bool,
 
+    // v1.13.0 — calibration thresholds previously hardcoded in
+    // `infra/presence.rs`. Stored here so they survive restarts and
+    // are visible in Setup → Calibración.
+    #[serde(default = "default_phone_conf_min")]
+    pub phone_conf_min: f32,
+    #[serde(default = "default_face_conf_min")]
+    pub face_conf_min: f32,
+
+    // v1.13.0 — minutes after a negative coach thumbs during which the
+    // LLM is bypassed in favour of the curated bank. 0 disables the
+    // cooldown.
+    #[serde(default = "default_coach_cooldown")]
+    pub coach_negative_cooldown_mins: u32,
+
     // v1.12.0 — per-plugin enable/disable overrides keyed by plugin id
     // (i.e. the .toml filename sans extension). Missing entries default
     // to enabled — once a plugin is dropped into the plugins folder it
@@ -168,6 +194,16 @@ pub struct Settings {
 }
 
 fn default_min_attention() -> u8 {
+    60
+}
+
+fn default_phone_conf_min() -> f32 {
+    0.45
+}
+fn default_face_conf_min() -> f32 {
+    0.6
+}
+fn default_coach_cooldown() -> u32 {
     60
 }
 
@@ -235,8 +271,12 @@ impl Default for Settings {
             next_deadline_at: None,
             next_deadline_label: String::new(),
             calendar_live_enabled: false,
+            calendar_ics_path: String::new(),
             min_attention_for_valid_session: default_min_attention(),
             deep_mode_enabled: false,
+            phone_conf_min: default_phone_conf_min(),
+            face_conf_min: default_face_conf_min(),
+            coach_negative_cooldown_mins: default_coach_cooldown(),
             plugin_overrides: std::collections::HashMap::new(),
         }
     }

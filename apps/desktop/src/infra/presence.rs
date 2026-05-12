@@ -114,6 +114,9 @@ pub struct YunetEngine {
     /// Actual input tensor name from the loaded model (varies between
     /// YuNet revisions: "input", "data", "image").
     input_name: String,
+    /// v1.13.0 — was hardcoded `FACE_CONF_MIN`; now configurable via
+    /// `settings.face_conf_min`.
+    face_conf_min: f32,
 }
 
 // SAFETY: ort::Session is documented as thread-safe (a single Session
@@ -204,7 +207,7 @@ impl YunetEngine {
             (false, true) => max_cls,
             (false, false) => 0.0,
         };
-        let presence = if combined >= FACE_CONF_MIN {
+        let presence = if combined >= self.face_conf_min {
             Presence::Present
         } else {
             Presence::Absent
@@ -330,6 +333,13 @@ impl PresenceProbe {
     }
 
     pub fn new() -> Result<Self, PresenceError> {
+        Self::new_with_thresholds(FACE_CONF_MIN)
+    }
+
+    /// v1.13.0 — caller-supplied face confidence threshold so the
+    /// Calibración tab's slider takes effect at probe boot. Mirrors
+    /// the legacy zero-arg `new()` for any older call sites.
+    pub fn new_with_thresholds(face_conf_min: f32) -> Result<Self, PresenceError> {
         let format = RequestedFormat::new::<LumaFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
         let mut camera = Camera::new(CameraIndex::Index(0), format)
             .map_err(|e| PresenceError::Open(e.to_string()))?;
@@ -340,7 +350,7 @@ impl PresenceProbe {
 
         // Try to load YuNet — non-fatal: if missing or load fails we
         // fall back to brightness heuristic.
-        let (yunet, mut mode) = match Self::try_load_yunet() {
+        let (yunet, mut mode) = match Self::try_load_yunet(face_conf_min) {
             Ok(Some(s)) => {
                 log::info!("PresenceProbe: YuNet ONNX loaded ({}x{})", s.input_w, s.input_h);
                 (Some(std::sync::Arc::new(std::sync::Mutex::new(s))), DetectionMode::YunetFace)
@@ -430,7 +440,7 @@ impl PresenceProbe {
         }))
     }
 
-    fn try_load_yunet() -> Result<Option<YunetEngine>, String> {
+    fn try_load_yunet(face_conf_min: f32) -> Result<Option<YunetEngine>, String> {
         let path = Self::yunet_path();
         if !path.exists() {
             return Ok(None);
@@ -470,6 +480,7 @@ impl PresenceProbe {
             input_w: 640,
             input_h: 640,
             input_name,
+            face_conf_min,
         }))
     }
 

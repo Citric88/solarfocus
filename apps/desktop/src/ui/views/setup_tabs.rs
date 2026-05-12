@@ -43,6 +43,11 @@ impl App {
             iced::widget::Space::with_width(SPACE_XS as f32),
             make_tab(SetupTab::Ai, "IA"),
             iced::widget::Space::with_width(SPACE_XS as f32),
+            make_tab(SetupTab::Calibration, match self.settings.language {
+                Language::Es => "Calibración",
+                Language::En => "Calibration",
+            }),
+            iced::widget::Space::with_width(SPACE_XS as f32),
             make_tab(SetupTab::Privacy, match self.settings.language {
                 Language::Es => "Privacidad",
                 Language::En => "Privacy",
@@ -60,6 +65,7 @@ impl App {
         let panel: Element<'_, Message> = match self.setup_tab {
             SetupTab::General => self.view_setup_general(),
             SetupTab::Ai => self.view_settings(),
+            SetupTab::Calibration => self.view_setup_calibration(),
             SetupTab::Privacy => self.view_setup_privacy(),
             SetupTab::Plugins => self.view_setup_plugins(),
             SetupTab::About => self.view_setup_about(),

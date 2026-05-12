@@ -289,10 +289,53 @@ impl App {
                 shortcut_row("B", pick("Tomar descanso", "Take break").to_string()),
                 shortcut_row("S", pick("Abrir Setup", "Open Setup").to_string()),
                 shortcut_row(
+                    "C",
+                    pick("Abrir Calibración", "Open Calibration").to_string(),
+                ),
+                shortcut_row(
                     "1 / 2 / 3 / 4",
                     pick("Focus / Stats / Coach / Setup", "Focus / Stats / Coach / Setup").to_string(),
                 ),
                 shortcut_row("5 / ?", pick("Ayuda", "Help").to_string()),
+            ]
+            .spacing(SPACE_XS as u16)
+            .into(),
+        );
+
+        // 6.5 Calibración card — when to tune what.
+        let calibration_card = settings_card_local(
+            pick("¿Cómo afinar SolarFocus?", "How to tune SolarFocus"),
+            column![
+                text(pick(
+                    "Si la app marca distracciones que no lo son → Setup → Calibración → sube Confianza mínima a 0.8 o usa el botón \"Falso positivo\" en el toast.",
+                    "If the app flags non-distractions → Setup → Calibration → raise Min confidence to 0.8, or use the \"False positive\" button on the toast.",
+                ))
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                text(pick(
+                    "Si la cámara te pausa cuando sigues sentado → sube Muestras Absent a 5–7.",
+                    "If the camera pauses you while you're still sitting there → raise Absent samples to 5–7.",
+                ))
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                text(pick(
+                    "Si tu celular no se detecta → baja Umbral YOLO a 0.30–0.35. Si te coge demasiados objetos como celular → sube a 0.55+.",
+                    "If your phone isn't detected → lower YOLO threshold to 0.30–0.35. If it catches too many things as phone → raise to 0.55+.",
+                ))
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                text(pick(
+                    "Si el coach IA repite mensajes que no te sirven → vota 👎; el siguiente vendrá del banco curado durante el cooldown configurado (default 60 min).",
+                    "If the AI coach gives messages you don't find helpful → vote 👎; the next one comes from the curated bank during the configured cooldown (default 60 min).",
+                ))
+                .size(FONT_SMALL)
+                .color(TEXT_SECONDARY),
+                text(pick(
+                    "Pulsa \"Probar detección ahora\" en Calibración para una inferencia inmediata sin tener que esperar a una sesión.",
+                    "Press \"Test detection now\" in Calibration for an immediate inference without waiting for a session.",
+                ))
+                .size(FONT_SMALL)
+                .color(TEXT_MUTED),
             ]
             .spacing(SPACE_XS as u16)
             .into(),
@@ -339,6 +382,7 @@ impl App {
             quick_start,
             feature_grid,
             shortcuts,
+            calibration_card,
             data_card,
             footer,
         ]

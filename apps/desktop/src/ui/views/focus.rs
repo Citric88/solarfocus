@@ -7,7 +7,7 @@ use iced::{Element, Length};
 use crate::ui::components::chip_local;
 use crate::ui::palette::*;
 use crate::{App, Message, SolarFocusCore};
-use solar_focus_intelligence::Language;
+use solar_focus_intelligence::{ClassificationLabel, Language};
 
 impl App {
     pub fn view_main(&self) -> Element<'_, Message> {
@@ -66,12 +66,49 @@ impl App {
         let microcopy: Element<'_, Message> = if toast_visible {
             let t = self.toast.as_ref().unwrap();
             let toast_text_color = iced::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 };
+            // v1.13.1 — show "Falso positivo" inline whenever the last
+            // classification was a distraction. One-tap path to add the
+            // process to the auto-generated user exceptions plugin
+            // without leaving the Focus canvas.
+            let last_was_distraction = self
+                .last_classification
+                .as_ref()
+                .map(|c| c.label == ClassificationLabel::Distraction)
+                .unwrap_or(false);
+            let fp_btn: Element<'_, Message> = if last_was_distraction {
+                button(
+                    text(match self.settings.language {
+                        Language::Es => "Falso positivo",
+                        Language::En => "False positive",
+                    })
+                    .size(FONT_SMALL)
+                    .color(toast_text_color),
+                )
+                .on_press(Message::MarkLastDistractionAsFalsePositive)
+                .padding([2, 10])
+                .style(|_, _| button::Style {
+                    background: Some(iced::Background::Color(iced::Color {
+                        r: 0.05, g: 0.05, b: 0.05, a: 0.10,
+                    })),
+                    text_color: iced::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 },
+                    border: iced::Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+            } else {
+                iced::widget::Space::with_width(0.0).into()
+            };
             container(
                 iced::widget::row![
                     text(t.text.clone())
                         .size(FONT_LEAD)
                         .color(toast_text_color),
                     iced::widget::horizontal_space(),
+                    fp_btn,
+                    iced::widget::Space::with_width(SPACE_XS as f32),
                     button(text("×").size(FONT_LEAD).color(toast_text_color))
                         .on_press(Message::DismissToast)
                         .padding([2, 10])

@@ -1,0 +1,170 @@
+name: Release
+
+# v2.1.0 — release pipeline that builds + signs + uploads platform
+# binaries when a tag is pushed. Each signing step is gated by a
+# secret presence check; if the secret isn't configured the job
+# skips with a clear log message instead of failing. This means the
+# workflow runs cleanly even before any cert is purchased — Gabriel
+# can add `MACOS_DEVELOPER_ID_P12_BASE64` and
+# `WINDOWS_AUTHENTICODE_PFX_BASE64` (+ passwords) when the time comes,
+# and the existing tag-trigger picks them up automatically.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos-release:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release (full features)
+        run: cargo build --release --features llm,classifier,presence,calendar,gpu-metal
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp target/release/solarfocus-desktop dist/
+          chmod +x dist/solarfocus-desktop
+
+      # --- Sign (skipped silently if MACOS_DEVELOPER_ID_P12_BASE64 not set) ---
+      - name: Decode signing certificate
+        if: env.MACOS_DEVELOPER_ID_P12_BASE64 != ''
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+        run: |
+          echo "$MACOS_DEVELOPER_ID_P12_BASE64" | base64 --decode > /tmp/cert.p12
+
+      - name: Import signing certificate
+        if: env.MACOS_DEVELOPER_ID_P12_BASE64 != ''
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/cert.p12 -k build.keychain \
+            -P "$MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm /tmp/cert.p12
+
+      - name: Sign binary
+        if: env.MACOS_DEVELOPER_ID_P12_BASE64 != ''
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --options runtime --deep --timestamp \
+            --sign "$MACOS_SIGNING_IDENTITY" dist/solarfocus-desktop
+          codesign --verify --deep --strict --verbose=2 dist/solarfocus-desktop
+
+      - name: Skip notice (no signing cert configured)
+        if: env.MACOS_DEVELOPER_ID_P12_BASE64 == ''
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+        run: |
+          echo "::notice::macOS signing skipped — MACOS_DEVELOPER_ID_P12_BASE64 secret not set."
+          echo "::notice::Binary will trigger Gatekeeper warning on first run; add the secret to enable Authenticode-style signing."
+
+      - name: Package
+        run: |
+          cd dist
+          tar -czf solarfocus-desktop-macos-${{ github.ref_name }}.tar.gz solarfocus-desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: solarfocus-desktop-macos
+          path: dist/solarfocus-desktop-macos-*.tar.gz
+
+  windows-release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release (no calendar — macOS-only path)
+        run: cargo build --release --features llm,classifier,presence
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/solarfocus-desktop.exe dist/
+
+      # --- Authenticode sign (skipped silently if no PFX secret) ---
+      - name: Decode signing certificate
+        if: env.WINDOWS_AUTHENTICODE_PFX_BASE64 != ''
+        shell: pwsh
+        env:
+          WINDOWS_AUTHENTICODE_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+        run: |
+          [System.IO.File]::WriteAllBytes(
+            "$env:TEMP\cert.pfx",
+            [System.Convert]::FromBase64String($env:WINDOWS_AUTHENTICODE_PFX_BASE64)
+          )
+
+      - name: Sign binary
+        if: env.WINDOWS_AUTHENTICODE_PFX_BASE64 != ''
+        shell: pwsh
+        env:
+          WINDOWS_AUTHENTICODE_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+          WINDOWS_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
+          & $signtool sign `
+            /f "$env:TEMP\cert.pfx" `
+            /p "$env:WINDOWS_AUTHENTICODE_PFX_PASSWORD" `
+            /tr http://timestamp.digicert.com `
+            /td sha256 `
+            /fd sha256 `
+            dist\solarfocus-desktop.exe
+          & $signtool verify /pa /v dist\solarfocus-desktop.exe
+
+      - name: Skip notice (no signing cert configured)
+        if: env.WINDOWS_AUTHENTICODE_PFX_BASE64 == ''
+        shell: bash
+        env:
+          WINDOWS_AUTHENTICODE_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+        run: |
+          echo "::notice::Windows signing skipped — WINDOWS_AUTHENTICODE_PFX_BASE64 secret not set."
+          echo "::notice::Binary will trigger SmartScreen warning until reputation accumulates; add the secret to enable Authenticode signing."
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          7z a "solarfocus-desktop-windows-${{ github.ref_name }}.zip" solarfocus-desktop.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: solarfocus-desktop-windows
+          path: dist/solarfocus-desktop-windows-*.zip
+
+  publish:
+    needs: [macos-release, windows-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release with binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/solarfocus-desktop-macos/*.tar.gz
+            artifacts/solarfocus-desktop-windows/*.zip
+          draft: true
+          generate_release_notes: true

@@ -130,7 +130,8 @@ sola acción.
 | Reveal en explorador | ✅ Finder | ✅ Explorer | ✅ xdg-open |
 | Detección de presencia (nokhwa) | ✅ AVFoundation | ✅ MediaFoundation | ⚠ V4L2 |
 | Detector de celular YOLOv8n | ✅ | ✅ | ⚠ untested |
-| Live Calendar (EventKit) | ✅ iCloud/Google/Exchange | ❌ v2.1+ | ❌ |
+| Live Calendar EventKit (iCloud/Google/Exchange unificado) | ✅ | ❌ | ❌ |
+| Live Calendar ICS (cross-platform v2.1+) | ✅ | ✅ | ✅ |
 | Manual deadline | ✅ | ✅ | ✅ |
 | Plugins TOML | ✅ | ✅ | ✅ |
 | Sistema de semillas + jardín | ✅ | ✅ | ✅ |
@@ -298,9 +299,16 @@ de cada release candidate vive en el journal de implementación
 - **`cargo build` con `llm` falla con "MSVC linker not found"**
   → instala Visual Studio Build Tools 2022 con "Desktop
   development with C++" workload.
-- **"Live Calendar no soportado"** → es esperado en v2.0; usa
-  el campo manual de deadline en Setup → General. Outlook
-  integration llega en v2.1+.
+- **"Live Calendar no soportado en esta plataforma"** → en v2.0
+  (sin ICS path) era esperado. v2.1+ resuelve esto: en Setup →
+  General introduce la ruta absoluta a un archivo `.ics` exportado
+  desde tu calendario:
+  - **Outlook**: File → Save Calendar → `.ics`
+  - **Google Calendar**: Settings → Export → archivo `.zip` con
+    un `.ics` por calendario; descomprime y apunta SolarFocus al
+    `.ics` que te interese
+  - **Apple Calendar**: File → Export → `.ics`
+  - **Exchange/Office 365**: subscribe URL → `.ics`
 - **Cámara no detecta nada (presencia)** → Windows Privacy
   Settings → Camera → SolarFocus debe estar permitido. La
   primera ejecución dispara el prompt UAC.
@@ -334,7 +342,7 @@ de cada release candidate vive en el journal de implementación
 |---|---|---|
 | **v2.0.0** | Windows port + CI matrix | DRAFT PR #16 |
 | **v2.0.1** | Hotfixes Windows (post live test) | TBD |
-| **v2.1** | Live Calendar Windows (WinRT/Outlook) + code signing | planned |
+| **v2.1.0** | ICS file calendar (cross-platform) + code signing CI | branch (pre-merge) |
 | **v2.2** | Auto-update (Sparkle macOS / WinSparkle Windows) | planned |
 | **v2.3** | MSI installer Windows + DMG firmada macOS | planned |
 | **v3.0** | Linux como plataforma soportada + bundle id migration | exploration |

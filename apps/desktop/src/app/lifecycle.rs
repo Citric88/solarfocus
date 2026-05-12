@@ -122,6 +122,9 @@ impl App {
                 Key::Character("s") | Key::Character("S") => {
                     Some(Message::SwitchRoute(Route::Setup))
                 }
+                Key::Character("c") | Key::Character("C") => {
+                    Some(Message::OpenCalibration)
+                }
                 Key::Character("1") => Some(Message::SwitchRoute(Route::Focus)),
                 Key::Character("2") => Some(Message::SwitchRoute(Route::Stats)),
                 Key::Character("3") => Some(Message::SwitchRoute(Route::Coach)),
