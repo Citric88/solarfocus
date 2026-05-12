@@ -650,10 +650,8 @@ pub mod ek {
     pub struct CalendarReader;
 
     impl CalendarReader {
-        pub fn new() -> Result<Self, CalendarError> {
-            Err(CalendarError::Unavailable(
-                "Live calendar no soportado en esta plataforma — usa el deadline manual".into(),
-            ))
+        pub fn new() -> Self {
+            Self
         }
         pub fn request_access(&self) -> Result<bool, CalendarError> {
             Ok(false)
